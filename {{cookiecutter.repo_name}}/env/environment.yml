@@ -1,0 +1,13 @@
+name: lcp
+channels: [conda-forge, defaults]
+dependencies:
+  - python=3.11
+  - cellprofiler
+  - cellpose
+  - pandas
+  - numpy
+  - pycytominer
+  - jupyterlab
+  - pip
+  - pip:
+      - pyarrow

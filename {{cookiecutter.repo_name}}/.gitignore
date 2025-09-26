@@ -1,0 +1,22 @@
+# big binaries and raw images
+*.tif
+*.tiff
+*.nd2
+*.czi
+*.lif
+images/
+illum/
+
+# heavy outputs
+workspace/**/SaveImages/
+workspace/**/QC_images/
+workspace/**/exports/
+workspace/**/db/*.sqlite
+workspace/**/db/*.db
+
+# caches
+.DS_Store
+*.tmp
+*.log
+__pycache__/
+.ipynb_checkpoints/
