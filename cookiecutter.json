@@ -1,5 +1,8 @@
 {
-  "intro_message": "🧬 Bem-vindo ao template Live Cell Painting!\n\nAntes de responder:\n- 'assay_slug': versão curta, minúscula, sem espaços (ex.: npps, agnp)\n- 'use_git_lfs': escolha 'yes' se vai versionar arquivos grandes no GitHub (não confundir com REDU)\n- 'date_tag': data no formato YYYYMMDD (ex.: 20250925, use datas reais)\n\nPressione ENTER para continuar.",
+  "ui_language": ["pt", "en"],
+
+  "intro_message": "{% if cookiecutter.ui_language == 'pt' -%}🧬 Bem-vindo ao template Live Cell Painting!\n\nAntes de responder:\n- 'assay_slug': versão curta, minúscula, sem espaços (ex.: npps, agnp)\n- 'use_git_lfs': escolha 'yes' se vai versionar arquivos grandes no GitHub (não confundir com REDU)\n- 'date_tag': data no formato YYYYMMDD (ex.: 20250925, use datas reais)\n\nPressione ENTER para continuar.{%- else -%}🧬 Welcome to the Live Cell Painting template!\n\nBefore you proceed:\n- 'assay_slug': short, lowercase, no spaces (e.g., npps, agnp)\n- 'use_git_lfs': choose 'yes' if you’ll version large files on GitHub (not the same as institutional archive)\n- 'date_tag': date as YYYYMMDD (e.g., 20250925, use a real date)\n\nPress ENTER to continue.{%- endif %}",
+
   "author_name": "Marcelo Bispo de Jesus",
   "author_email": "nanocell@unicamp.br",
   "org_name": "NanoCell Interactions Lab - Unicamp",
