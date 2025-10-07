@@ -7,19 +7,21 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 # Contexto via Jinja
-LANG = "{{ cookiecutter.ui_language }}".lower()
-use_lfs   = "{{ cookiecutter.use_git_lfs }}".lower() == "yes"
-inc_pipe  = "{{ cookiecutter.include_example_pipelines }}".lower() == "yes"
-inc_nb    = "{{ cookiecutter.include_example_notebooks }}".lower() == "yes"
-inc_models= "{{ cookiecutter.include_example_models }}".lower() == "yes"
-inc_redu  = "{{ cookiecutter.include_redu_packager }}".lower() == "yes"
-cell_line = "{{ cookiecutter.cell_line }}"
-assay_slug= "{{ cookiecutter.assay_slug }}"
+LANG       = "{{ cookiecutter.ui_language }}".lower()
+use_lfs    = "{{ cookiecutter.use_git_lfs }}".lower() == "yes"
+inc_pipe   = "{{ cookiecutter.include_example_pipelines }}".lower() == "yes"
+inc_nb     = "{{ cookiecutter.include_example_notebooks }}".lower() == "yes"
+inc_models = "{{ cookiecutter.include_example_models }}".lower() == "yes"
+inc_redu   = "{{ cookiecutter.include_redu_packager }}".lower() == "yes"
+cell_line  = "{{ cookiecutter.cell_line }}"
+assay_slug = "{{ cookiecutter.assay_slug }}"
+batch_tag  = "{{ cookiecutter.batch_tag }}"              # <-- ADICIONADO
+plate_id   = "{{ cookiecutter.plate_id_example }}"       # <-- ADICIONADO
 
 def log(pt, en):
     print(pt if LANG == "pt" else en)
 
-base = pathlib.Path(".")  # <-- Faltava isso!
+base = pathlib.Path(".")
 
 # 0) git init (não falha se git não estiver disponível)
 try:
@@ -50,7 +52,7 @@ if use_lfs:
 for p in base.rglob("*.cppipe.example"):
     try:
         if inc_pipe:
-            target = p.with_suffix("")  # remove apenas ".example" -> vira .cppipe
+            target = p.with_suffix("")  # remove ".example" -> vira .cppipe
             p.rename(target)
             log(f"✓ Pipeline ativado: {target}",
                 f"✓ Pipeline enabled: {target}")
@@ -61,6 +63,16 @@ for p in base.rglob("*.cppipe.example"):
     except Exception as e:
         log(f"⚠️ Erro ao processar pipeline {p}: {e}",
             f"⚠️ Error processing pipeline {p}: {e}")
+
+# 2.1) Ativar barcode_platemap.csv a partir de .example (qualquer batch)
+for p in base.rglob("workspace/metadata/*/barcode_platemap.csv.example"):
+    try:
+        p.rename(p.with_name("barcode_platemap.csv"))
+        log("✓ barcode_platemap.csv ativado",
+            "✓ barcode_platemap.csv enabled")
+    except Exception as e:
+        log(f"⚠️ Erro ao ativar barcode_platemap: {e}",
+            f"⚠️ Error enabling barcode_platemap: {e}")
 
 # 3) Ativar/Remover REDU packager (ex.: make_redu_package.py.example)
 for p in base.rglob("make_redu_package.py.example"):
@@ -115,6 +127,17 @@ else:
     log("ℹ️ Pasta de modelos não encontrada (pule se não usar).",
         "ℹ️ Models folder not found (skip if not using).")
 
+# 5') Garantir <cell>/<assay>/<batch>/(images|illum)/<plate>/.gitkeep
+raw_imgs  = base / cell_line / assay_slug / batch_tag / "images" / plate_id
+raw_illum = base / cell_line / assay_slug / batch_tag / "illum"  / plate_id
+for d in (raw_imgs, raw_illum):
+    d.mkdir(parents=True, exist_ok=True)
+    keep = d / ".gitkeep"
+    if not keep.exists():
+        keep.write_text("")
+log(f"✓ Pastas de batch criadas/garantidas: {raw_imgs} e {raw_illum}",
+    f"✓ Ensured raw batch folders: {raw_imgs} and {raw_illum}")
+
 # 6) Mensagem final
 if LANG == "pt":
     print("\n✅ Projeto criado com sucesso!")
@@ -136,3 +159,4 @@ else:
     print("   - Conda environment:")
     print("       conda env create -f env/environment.yml")
     print("       conda activate lcp")
+
