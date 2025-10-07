@@ -13,6 +13,12 @@
   "plate_format": ["6", "12", "24", "48", "96", "384"],
   "date_tag": "YYYYMMDD",
 
+  "batch_tag": "2025_11_09_batch1",
+  "plate_id_example": "SQ00015167",
+
+  "external_raw_root": "",
+  "create_symlink_to_external_raw": ["no", "yes"],
+
   "project_title": "Live Cell Painting - {{ cookiecutter.cell_line }} - {{ cookiecutter.assay_name }}",
   "repo_name": "lcp-{{ cookiecutter.cell_line | lower }}-{{ cookiecutter.assay_slug }}-{{ cookiecutter.date_tag }}",
 
@@ -21,4 +27,5 @@
   "include_example_notebooks": ["yes", "no"],
   "include_example_models": ["yes", "no"],
   "include_redu_packager": ["yes", "no"]
+
 }
