@@ -13,8 +13,8 @@
   "plate_format": ["6", "12", "24", "48", "96", "384"],
   "date_tag": "YYYYMMDD",
 
-  "batch_tag": "250808_102354_Plate_1",
-  "plate_id_example": "250808_101736_AONPPS",
+  "batch_tags": "250808_102354_Plate_1, 250813_094546_Plate_1, 250815_094252_Plate_1",
+  "plate_ids":  "250808_101736_AONPPS, 250813_094546_AONPPS",
 
   "external_raw_root": "",
   "create_symlink_to_external_raw": ["no", "yes"],
