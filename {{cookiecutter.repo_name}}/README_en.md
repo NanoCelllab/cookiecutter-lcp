@@ -55,8 +55,10 @@ Huh7/npps/
     └── metadata/20251109_batch1/PlateX/
 ```
 
-> 💡 **Tip:** The template automatically creates a *demo batch* (`{{cookiecutter.batch_tag}}`)  
-> and a *demo plate* (`{{cookiecutter.plate_id_example}}`).  
+> 💡 **Tip:** The template can automatically create *demo batches*:
+> `{{ cookiecutter.batch_tags | default(cookiecutter.batch_tag, true) }}`
+> and *demo plates*:
+> `{{ cookiecutter.plate_ids | default(cookiecutter.plate_id_example, true) }}`.
 > You can rename or remove them once you have your real data.
 
 ---
