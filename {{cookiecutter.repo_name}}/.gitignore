@@ -1,22 +1,30 @@
-# big binaries and raw images
+# Raw data (track only .gitkeep)
+**/images/*
+!**/images/.gitkeep
+
+**/illum/*
+!**/illum/.gitkeep
+
+# Big binaries
 *.tif
 *.tiff
 *.nd2
 *.czi
 *.lif
-images/
-illum/
+*.npz
+*.npy
 
-# heavy outputs
+# Heavy outputs (customize as needed)
 workspace/**/SaveImages/
 workspace/**/QC_images/
 workspace/**/exports/
 workspace/**/db/*.sqlite
 workspace/**/db/*.db
 
-# caches
+# Caches / temp
 .DS_Store
 *.tmp
 *.log
 __pycache__/
 .ipynb_checkpoints/
+
