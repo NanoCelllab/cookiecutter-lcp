@@ -211,6 +211,21 @@ for b in batches:
 for d in created:
     log(f"✓ Criado: {d}", f"✓ Created: {d}")
 
+# 6.5) Se existir um barcode_platemap.csv.example na raiz (workspace/metadata),
+#      copiar para cada batch e ativar como barcode_platemap.csv
+root_example = base / cell_line / assay_slug / "workspace" / "metadata" / "barcode_platemap.csv.example"
+if root_example.exists():
+    for b in batches:
+        dst = base / cell_line / assay_slug / "workspace" / "metadata" / b / "barcode_platemap.csv"
+        if not dst.exists():
+            dst.write_bytes(root_example.read_bytes())
+            log(f"✓ barcode_platemap.csv copiado para {dst}",
+                f"✓ barcode_platemap.csv copied to {dst}")
+else:
+    log("ℹ️ Nenhum barcode_platemap.csv.example na raiz de metadata; pulei cópia.",
+        "ℹ️ No root metadata/barcode_platemap.csv.example; skipped copy.")
+
+
 # =========================
 # 7) Mensagem final
 # =========================
