@@ -30,8 +30,19 @@ def _split_csv(s: str):
     return [x.strip() for x in s.split(",") if x.strip()]
 
 # Listas finais (aceita 1 ou vários valores)
-batches = _split_csv(raw_batches) or ["{{ cookiecutter.batch_tags }}"]
-plates  = _split_csv(raw_plates)  or ["{{ cookiecutter.plate_ids }}"]
+def _split_csv(s: str):
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+batches = _split_csv(raw_batches)
+plates  = _split_csv(raw_plates)
+
+if not batches:
+    log("⚠️  Nenhum 'batch_tags' informado; pulando criação de pastas de batch.",
+        "⚠️  No 'batch_tags' provided; skipping batch folder creation.")
+if not plates:
+    log("⚠️  Nenhum 'plate_ids' informado; pulando criação de pastas de plate.",
+        "⚠️  No 'plate_ids' provided; skipping plate folder creation.")
+
 
 base = pathlib.Path(".")
 
