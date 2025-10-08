@@ -199,7 +199,7 @@ for b in batches:
         if not k.exists():
             k.write_text("")
 
-# 6.4) workspace: metadata por batch (platemap e barcode)
+# 6.4) workspace: metadata por batch (somente a pasta 'platemap'; sem barcode por batch)
 for b in batches:
     d_meta = base / cell_line / assay_slug / "workspace" / "metadata" / b / "platemap"
     d_meta.mkdir(parents=True, exist_ok=True)
@@ -207,23 +207,25 @@ for b in batches:
     if not k.exists():
         k.write_text("")
 
-# Log do que foi criado (raw)
-for d in created:
-    log(f"✓ Criado: {d}", f"✓ Created: {d}")
+# 6.5) barcode_platemap.csv GLOBAL em workspace/metadata (apenas 1)
+meta_root = base / cell_line / assay_slug / "workspace" / "metadata"
+meta_root.mkdir(parents=True, exist_ok=True)
 
-# 6.5) Se existir um barcode_platemap.csv.example na raiz (workspace/metadata),
-#      copiar para cada batch e ativar como barcode_platemap.csv
-root_example = base / cell_line / assay_slug / "workspace" / "metadata" / "barcode_platemap.csv.example"
-if root_example.exists():
-    for b in batches:
-        dst = base / cell_line / assay_slug / "workspace" / "metadata" / b / "barcode_platemap.csv"
-        if not dst.exists():
-            dst.write_bytes(root_example.read_bytes())
-            log(f"✓ barcode_platemap.csv copiado para {dst}",
-                f"✓ barcode_platemap.csv copied to {dst}")
+root_example = meta_root / "barcode_platemap.csv.example"
+root_final   = meta_root / "barcode_platemap.csv"
+
+if root_example.exists() and not root_final.exists():
+    root_final.write_bytes(root_example.read_bytes())
+    # opcional: remover o .example após promover
+    try:
+        root_example.unlink()
+    except Exception:
+        pass
+    log("✓ barcode_platemap.csv configurado em workspace/metadata (global)",
+        "✓ barcode_platemap.csv set at workspace/metadata (global)")
 else:
-    log("ℹ️ Nenhum barcode_platemap.csv.example na raiz de metadata; pulei cópia.",
-        "ℹ️ No root metadata/barcode_platemap.csv.example; skipped copy.")
+    log("ℹ️ Mantendo barcode_platemap.csv somente na raiz de metadata; nada a fazer.",
+        "ℹ️ Keeping barcode_platemap.csv only at metadata root; nothing to do.")
 
 
 # =========================
