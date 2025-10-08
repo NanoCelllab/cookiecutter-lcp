@@ -1,7 +1,18 @@
-
-# macOS cruft
+# --- Dev do template ---
+.venv/
+.env
+.env.*
+__pycache__/
+*.pyc
+*.log
 .DS_Store
-._*
 
-# macOS
-.DS_Store
+# Artefatos de teste do cookiecutter
+cookiecutter_test/
+**/.ipynb_checkpoints/
+
+# IDE/OS
+.vscode/
+.idea/
+Thumbs.db
+

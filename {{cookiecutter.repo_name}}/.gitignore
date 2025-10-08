@@ -1,0 +1,29 @@
+# --- Dados brutos / muito pesados ---
+images/
+workspace/backend/*/*.sqlite
+workspace/backend/*/*.db
+workspace/backend/*/*single_cell*.csv
+workspace_dl/**/checkpoints/
+
+# --- Temporários / cache ---
+**/.ipynb_checkpoints/
+**/__pycache__/
+*.pyc
+*.tmp
+
+# --- Ambientes locais ---
+.venv/
+.env
+.env.*
+
+# --- SO / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Logs ---
+*.log
+
+# --- Opcional: manter estruturas vazias ---
+# (usamos .gitkeep para pastas vazias)
