@@ -1,15 +1,19 @@
 {
-  "ui_language": ["pt", "en"],
-  "author_name": "Seu Nome",
-  "author_email": "email@exemplo.com",
-  "org_name": "NanoCell Interactions Lab - UNICAMP",
-  "project_focus": "nanoplastics polystyrene",
+  "author_name": "Your Name",
+  "author_email": "you@example.com",
+  "org_name": "nanocell-interactions-lab-unicamp",
+
+  "project_focus": "nanoplastics-polystyrene",
   "cell_model": "Huh7",
-  "repo_name": "lcp-{{ cookiecutter.project_focus | lower }}-{{ cookiecutter.cell_model | lower }}",
+
   "experiment_date": "YYYY_MM_DD",
   "treatment": "NPPS",
   "condition": "24h",
-  "experiment_name": "{{ cookiecutter.experiment_date }}_{{ cookiecutter.cell_model }}_{{ cookiecutter.treatment }}_{{ cookiecutter.condition }}",
+
+  "experiment_name": "{{ cookiecutter.experiment_date }}_{{ cookiecutter.cell_model | replace(' ', '-') }}_{{ cookiecutter.treatment | replace(' ', '-') }}_{{ cookiecutter.condition | replace(' ', '-') }}",
+
+  "repo_name": "lcp-{{ cookiecutter.project_focus | lower | replace(' ', '-') }}-{{ cookiecutter.cell_model | lower | replace(' ', '-') }}",
+
   "include_example_pipelines": ["yes", "no"],
   "include_example_notebooks": ["yes", "no"],
   "include_example_models": ["yes", "no"]

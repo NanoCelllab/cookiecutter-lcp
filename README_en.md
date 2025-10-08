@@ -1,129 +1,90 @@
-# 🧬 Cookiecutter Live Cell Painting (LCP)
+# 🍪🔬 Live Cell Painting — HCA Project
 
-A **reproducible project generator** for Live Cell Painting and phenotypic profiling experiments.  
-Developed by the **NanoCell Interactions Lab (Unicamp)** to standardize folder structures, streamline data organization, and promote reproducibility in image-based research.
+Welcome! This repository is your **main project** for *High Content Analysis (HCA)* using **Live Cell Painting (LCP)**.  
+The idea is simple: you’ll have **one repository for your entire research project**, and **each experiment** becomes a separate folder named with the date, cell line, and assay (e.g., `2025_05_09_Huh7_NPPS_24h`), appearing **in parallel** under `images/`, `workspace/`, and `workspace_dl/`.
 
----
-
-## 📦 What this template does
-
-This [Cookiecutter](https://cookiecutter.readthedocs.io/en/stable/) automatically creates a complete project scaffold, including:
-
-- Organized folders for **batches** and **plates**
-- Workspace directories for **analysis, metadata, pipelines, models, and profiles**
-- Example files for **pipelines, notebooks, and models**
-- Optional integration with **Git and Git-LFS** for reproducible version control
-
-Ideal for:
-- **Live Cell Painting** and **Cell Painting** assays  
-- **High-content microscopy** and image-based screening  
-- Projects with **multiple plates and batches**
+> 💡 **GitHub is for versioning code and text files** (tracking script and metadata changes).  
+> ⚠️ **Do not upload raw microscopy images or large files!** Store them in [REDU (Unicamp)](https://redu.unicamp.br) or your institutional repository.
 
 ---
 
-## 🚀 How to use
+## 📂 Repository structure
 
-### 1️⃣ Install Cookiecutter
+```
+<repo_root>/
+├─ images/
+│  └─ <experiment>/images/, illum/
+├─ workspace/
+│  ├─ metadata/<experiment>/barcode_platemap.csv, platemap/
+│  ├─ pipelines/<experiment>/{assaydev.cppipe, analysis.cppipe, illum.cppipe}
+│  ├─ assaydev/<experiment>/outlines_qc/
+│  ├─ load_data_csv/<experiment>/
+│  ├─ analysis/<experiment>/analysis/
+│  ├─ profiles/<experiment>/
+│  ├─ backend/<experiment>/
+│  ├─ models/
+│  └─ cellpose/
+└─ workspace_dl/
+   └─ <experiment>/notebooks/
+```
+
+---
+
+## 🚀 Steps
+
+1️⃣ **Create an experiment**
 ```bash
-pip install cookiecutter
+mkdir -p images/2025_05_09_Huh7_NPPS_24h/{images,illum}
+mkdir -p workspace/{metadata,pipelines,assaydev,load_data_csv,analysis,profiles,backend}/2025_05_09_Huh7_NPPS_24h
+mkdir -p workspace_dl/2025_05_09_Huh7_NPPS_24h/notebooks
 ```
 
-### 2️⃣ Generate a new project
-Run the template directly from GitHub:
+2️⃣ **Add raw microscopy images**
+- `images/<experiment>/images/`
+- `images/<experiment>/illum/`
 
-```bash
-cookiecutter gh:NanoCelllab/cookiecutter-lcp
+3️⃣ **Generate metadata**
+- Use Load Data Generator & Layout Generator to create CSVs  
+- Save in:
 ```
-
-During setup, you’ll see prompts like:
-```
-[1/21] Select ui_language (1=pt, 2=en)
-...
-[11/21] batch_tags (comma-separated list)
-[12/21] plate_ids (comma-separated list)
-...
+workspace/load_data_csv/<experiment>/
+workspace/metadata/<experiment>/
 ```
 
-Example input:
-```
-batch_tags: 250808_102354_Plate_1, 250813_094546_Plate_1, 250815_094252_Plate_1
-plate_ids: 250808_101736_AONPPS, 250813_094546_AONPPS
-```
+4️⃣ **Prepare analysis**
+- `assaydev.cppipe` → test & QC  
+- `analysis.cppipe` → full feature extraction  
+- `illum.cppipe` → optional illumination correction
+
+5️⃣ **Results**
+| Data type | Path |
+|------------|------|
+| Single-cell CSVs | workspace/analysis/<experiment>/analysis/ |
+| Aggregated profiles | workspace/profiles/<experiment>/ |
+| SQLite databases | workspace/backend/<experiment>/ |
 
 ---
 
-## 📁 Example output structure
-
-```
-lcp-huh7-npps-20250509/
-├── env/
-│   └── environment.yml
-├── Huh7/
-│   └── npps/
-│       ├── 250808_102354_Plate_1/
-│       │   ├── images/
-│       │   └── illum/
-│       ├── workspace/
-│       │   ├── metadata/
-│       │   │   ├── barcode_platemap.csv
-│       │   │   └── <batch>/platemap/
-│       │   ├── analysis/
-│       │   ├── pipelines/
-│       │   ├── models/
-│       │   └── profiles/
-│       └── workspace_dl/
-│           └── notebooks/
-│               └── 00_setup.ipynb
-└── README.md
-```
+## ✅ Best practices
+- **Naming:** `YYYY_MM_DD_CellLine_Assay` (no spaces or accents).  
+- **Version control:** commit only scripts, metadata, and light files.  
+- **Data storage:** keep raw data in REDU.  
+- **Reproducibility:** update metadata, notebooks, and pipelines.
 
 ---
 
-## 🧠 Why use this template?
-
-- **Standardizes** folder organization across assays and users  
-- **Simplifies** downstream automation (CellProfiler, pycytominer, Zenodo, etc.)  
-- **Ensures** reproducibility and data traceability  
-- **Supports** multiple batches and plates automatically  
-
-Used by the **NanoCell Interactions Lab (Unicamp)** and collaborators at the **Broad Institute**.
+## 🔗 Useful links
+- [CellProfiler docs](https://cellprofiler.org/)
+- [pycytominer](https://github.com/cytomining/pycytominer)
+- [Cell Painting Gallery structure](https://broadinstitute.github.io/cellpainting-gallery/data_structure.html)
+- [REDU (Unicamp)](https://redu.unicamp.br)
 
 ---
 
-## ⚙️ Included hooks
-
-- **pre_gen_project.py** → validates user inputs before generation  
-- **post_gen_project.py** → dynamically creates all folders for each batch × plate combination and activates example files  
-
----
-
-## 🔁 Updating your local copy
-
-To refresh your local template:
-
-```bash
-rm -rf ~/.cookiecutters/cookiecutter-lcp
-cookiecutter gh:NanoCelllab/cookiecutter-lcp
-```
-
----
-
-## 👩‍🔬 Authors
-
-**Marcelo Bispo de Jesus** – NanoCell Interactions Lab, Unicamp  
-Collaborators: Lucas.
-
----
-
-## 📄 License
-
-Distributed under the **MIT License**.  
-See the [`LICENSE`](./LICENSE) file for details.
-
----
-
-## 🔗 Related resources
-
-- [Cell Painting – Broad Institute](https://www.broadinstitute.org/cell-painting)  
-- [pycytominer – cytomining toolkit](https://github.com/cytomining/pycytominer)  
-- [CellProfiler pipelines](https://cellprofiler.org/)
+## 🧩 Quick checklist
+- [ ] Created `<experiment>` folders in all roots
+- [ ] Added raw images
+- [ ] Generated `load_data.csv` and platemap
+- [ ] Ran QC + analysis pipelines
+- [ ] Pushed only lightweight files
+- [ ] Archived data in REDU
