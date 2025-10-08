@@ -1,164 +1,129 @@
-# 🍪🔪 Live Cell Painting Project
+# 🧬 Cookiecutter Live Cell Painting (LCP)
 
-Welcome to your **Live Cell Painting (LCP)** project!  
-This structure was automatically generated from [cookiecutter-lcp](https://github.com/NanoCelllab/cookiecutter-lcp) to ensure **organization, reproducibility, and best practices** across experiments.
+A **reproducible project generator** for Live Cell Painting and phenotypic profiling experiments.  
+Developed by the **NanoCell Interactions Lab (Unicamp)** to standardize folder structures, streamline data organization, and promote reproducibility in image-based research.
 
 ---
 
-## 📂 Folder Structure
+## 📦 What this template does
+
+This [Cookiecutter](https://cookiecutter.readthedocs.io/en/stable/) automatically creates a complete project scaffold, including:
+
+- Organized folders for **batches** and **plates**
+- Workspace directories for **analysis, metadata, pipelines, models, and profiles**
+- Example files for **pipelines, notebooks, and models**
+- Optional integration with **Git and Git-LFS** for reproducible version control
+
+Ideal for:
+- **Live Cell Painting** and **Cell Painting** assays  
+- **High-content microscopy** and image-based screening  
+- Projects with **multiple plates and batches**
+
+---
+
+## 🚀 How to use
+
+### 1️⃣ Install Cookiecutter
+```bash
+pip install cookiecutter
+```
+
+### 2️⃣ Generate a new project
+Run the template directly from GitHub:
 
 ```bash
-<repo_name>/
-├── .gitignore                     # ignores large files (images, outputs)
-├── <cell_line>/                   # cell line used (e.g., Huh7)
-│   └── <assay_slug>/              # assay (e.g., npps)
-│       ├── <batch_tag>/           # data batch from Cytation
-│       │   ├── images/            # raw image data organized by plate
-│       │   │   └── <plate_id>/    # e.g., SQ00015167, PlateX...
-│       │   └── illum/             # illumination correction files
-│       │       └── <plate_id>/    
-│       ├── workspace/             # analysis and processed outputs
-│       │   ├── analysis/          # full feature extraction
-│       │   │   └── <batch>/<plate>/
-│       │   ├── assaydev/          # QC and segmentation testing
-│       │   ├── backend/           # databases (.csv, .sqlite)
-│       │   │   └── <batch>/<plate>/
-│       │   ├── cellpose/          # Cellpose model outputs and logs
-│       │   ├── load_data_csv/     # LoadData.csv files per batch/plate
-│       │   │   └── <batch>/<plate>/
-│       │   ├── metadata/          # platemaps, layouts, barcodes
-│       │   │   └── <batch>/<plate>/
-│       │   ├── models/            # trained models (Cellpose, etc.)
-│       │   ├── pipelines/         # CellProfiler pipelines (.cppipe)
-│       │   └── profiles/          # phenotypic profiles (pycytominer)
-│       └── workspace_dl/          # deep learning analyses
-└── README.md                      # this file
+cookiecutter gh:NanoCelllab/cookiecutter-lcp
+```
+
+During setup, you’ll see prompts like:
+```
+[1/21] Select ui_language (1=pt, 2=en)
+...
+[11/21] batch_tags (comma-separated list)
+[12/21] plate_ids (comma-separated list)
+...
+```
+
+Example input:
+```
+batch_tags: 250808_102354_Plate_1, 250813_094546_Plate_1, 250815_094252_Plate_1
+plate_ids: 250808_101736_AONPPS, 250813_094546_AONPPS
 ```
 
 ---
 
-## 🧩 Batch and Plate Organization
+## 📁 Example output structure
 
-Each **batch** represents a set of images exported from the Cytation microscope (or another imaging device).  
-Within each batch, there may be one or multiple **plates**.
+```
+lcp-huh7-npps-20250509/
+├── env/
+│   └── environment.yml
+├── Huh7/
+│   └── npps/
+│       ├── 250808_102354_Plate_1/
+│       │   ├── images/
+│       │   └── illum/
+│       ├── workspace/
+│       │   ├── metadata/
+│       │   │   ├── barcode_platemap.csv
+│       │   │   └── <batch>/platemap/
+│       │   ├── analysis/
+│       │   ├── pipelines/
+│       │   ├── models/
+│       │   └── profiles/
+│       └── workspace_dl/
+│           └── notebooks/
+│               └── 00_setup.ipynb
+└── README.md
+```
 
-### Example:
+---
+
+## 🧠 Why use this template?
+
+- **Standardizes** folder organization across assays and users  
+- **Simplifies** downstream automation (CellProfiler, pycytominer, Zenodo, etc.)  
+- **Ensures** reproducibility and data traceability  
+- **Supports** multiple batches and plates automatically  
+
+Used by the **NanoCell Interactions Lab (Unicamp)** and collaborators at the **Broad Institute**.
+
+---
+
+## ⚙️ Included hooks
+
+- **pre_gen_project.py** → validates user inputs before generation  
+- **post_gen_project.py** → dynamically creates all folders for each batch × plate combination and activates example files  
+
+---
+
+## 🔁 Updating your local copy
+
+To refresh your local template:
+
 ```bash
-Huh7/npps/
-├── 20251109_batch1/
-│   ├── images/PlateX/
-│   └── illum/PlateX/
-└── workspace/
-    ├── analysis/20251109_batch1/PlateX/
-    ├── backend/20251109_batch1/PlateX/
-    ├── load_data_csv/20251109_batch1/PlateX/
-    └── metadata/20251109_batch1/PlateX/
-```
-
-> 💡 **Tip:** The template can automatically create *demo batches*:
-> `{{ cookiecutter.batch_tags | default(cookiecutter.batch_tag, true) }}`
-> and *demo plates*:
-> `{{ cookiecutter.plate_ids | default(cookiecutter.plate_id_example, true) }}`.
-> You can rename or remove them once you have your real data.
-
----
-
-## 🚀 How to Use
-
-### 1️⃣ Initialize your repository
-
-```bash
-git init
-git add .
-git commit -m "Initial commit from LCP template"
-git remote add origin <your-repo-URL>
-git branch -M main
-git push -u origin main
+rm -rf ~/.cookiecutters/cookiecutter-lcp
+cookiecutter gh:NanoCelllab/cookiecutter-lcp
 ```
 
 ---
 
-### 2️⃣ Add your raw images
+## 👩‍🔬 Authors
 
-Place your Cytation exports in:
-
-```
-<cell_line>/<assay_slug>/<batch_tag>/images/<plate_id>/
-```
-
-If illumination correction is used:
-
-```
-<cell_line>/<assay_slug>/<batch_tag>/illum/<plate_id>/
-```
+**Marcelo Bispo de Jesus** – NanoCell Interactions Lab, Unicamp  
+Collaborators: Lucas.
 
 ---
 
-### 3️⃣ Set up metadata
+## 📄 License
 
-Use **Load Data Generator** and **Layout Generator** to create `.csv` metadata files.  
-Save them in:
-
-```
-<cell_line>/<assay_slug>/workspace/load_data_csv/<batch_tag>/<plate_id>/
-<cell_line>/<assay_slug>/workspace/metadata/<batch_tag>/<plate_id>/
-```
+Distributed under the **MIT License**.  
+See the [`LICENSE`](./LICENSE) file for details.
 
 ---
 
-### 4️⃣ Run your analysis
+## 🔗 Related resources
 
-Import or edit `.cppipe` pipelines in:
-
-```
-<cell_line>/<assay_slug>/workspace/pipelines/
-```
-
-- Adjust `assaydev.cppipe` parameters for quality control.  
-- Run `analysis.cppipe` for full feature extraction.  
-- Results will appear under `workspace/analysis/`.
-
----
-
-### 5️⃣ Outputs
-
-| Output Type | Location |
-|--------------|-----------|
-| **Single-cell features** | `workspace/analysis/<batch>/<plate>/` |
-| **Aggregated profiles** | `workspace/profiles/` |
-| **Databases (.sqlite/.csv)** | `workspace/backend/<batch>/<plate>/` |
-
----
-
-## ⚠️ About `.gitkeep` Files
-
-These files exist only to ensure **empty directories** are tracked by Git.  
-- If the folder is empty → **keep** `.gitkeep`.  
-- If it contains real files → you may **delete** it (optional).
-
----
-
-## 📌 Best Practices
-
-✅ **Naming conventions**  
-Use `CellLine_Assay_Date` (e.g., `Huh7_NPPS_20250925`).  
-Avoid spaces, accents, and capital letters.
-
-✅ **Version control**  
-Never upload raw images (`images/`, `illum/`) to GitHub.  
-Only analysis files, metadata, and pipelines should be versioned.
-
-✅ **Data storage**  
-Use [REDU Unicamp](https://redu.unicamp.br/) or institutional repositories for heavy data.
-
-✅ **Reproducibility**  
-Keep pipelines, metadata, and notebooks versioned and updated.  
-Document relevant changes via Git commits.
-
----
-
-## 📚 Useful Resources
-
-- [📘 CellProfiler Documentation](https://cellprofiler-manual.s3.amazonaws.com/CellProfiler-4.2.1/index.html)  
-- [📊 pycytominer Documentation](https://github.com/cytomining/pycytominer)  
-- [🍪 Cookiecutter LCP Template](https://github.com/NanoCelllab/cookiecutter-lcp)
+- [Cell Painting – Broad Institute](https://www.broadinstitute.org/cell-painting)  
+- [pycytominer – cytomining toolkit](https://github.com/cytomining/pycytominer)  
+- [CellProfiler pipelines](https://cellprofiler.org/)

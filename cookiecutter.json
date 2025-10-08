@@ -1,29 +1,12 @@
-{
+{{
   "ui_language": ["pt", "en"],
-
-  "intro_message": "{% if cookiecutter.ui_language == 'pt' -%}🧬 Bem-vindo ao template Live Cell Painting!\n\nAntes de responder:\n- 'assay_slug': versão curta, minúscula, sem espaços (ex.: npps, agnp)\n- 'use_git_lfs': escolha 'yes' se vai versionar arquivos grandes no GitHub (não confundir com REDU)\n- 'date_tag': data no formato YYYYMMDD (ex.: 20250925, use datas reais)\n\nPressione ENTER para continuar.{%- else -%}🧬 Welcome to the Live Cell Painting template!\n\nBefore you proceed:\n- 'assay_slug': short, lowercase, no spaces (e.g., npps, agnp)\n- 'use_git_lfs': choose 'yes' if you’ll version large files on GitHub (not the same as institutional archive)\n- 'date_tag': date as YYYYMMDD (e.g., 20250925, use a real date)\n\nPress ENTER to continue.{%- endif %}",
-
-  "intro_message": "…",
-  "author_name": "Marcelo Bispo de Jesus",
-  "author_email": "nanocell@unicamp.br",
-  "org_name": "NanoCell Interactions Lab - Unicamp",
-  "cell_line": "Huh7",
-  "assay_name": "Nanoplastics NPPS",
-  "assay_slug": "npps",
-  "plate_format": ["6","12","24","48","96","384"],
-  "date_tag": "YYYYMMDD",
-
-  "batch_tags": "250808_102354_Plate_1, 250813_094546_Plate_1, 250815_094252_Plate_1",
-  "plate_ids":  "250808_101736_AONPPS, 250813_094546_AONPPS",
-
-  "external_raw_root": "",
-  "create_symlink_to_external_raw": ["no","yes"],
-
-  "project_title": "Live Cell Painting - {{ cookiecutter.cell_line }} - {{ cookiecutter.assay_name }}",
-  "repo_name": "lcp-{{ cookiecutter.cell_line | lower }}-{{ cookiecutter.assay_slug }}-{{ cookiecutter.date_tag }}",
-  "use_git_lfs": ["no","yes"],
-  "include_example_pipelines": ["yes","no"],
-  "include_example_notebooks": ["yes","no"],
-  "include_example_models": ["yes","no"],
-  "include_redu_packager": ["yes","no"]
+  "author_name": "Seu Nome",
+  "author_email": "email@exemplo.com",
+  "org_name": "NanoCell Interactions Lab - UNICAMP",
+  "project_title": "Live Cell Painting - {{ cookiecutter.org_name }}",
+  "repo_name": "lcp-{{ cookiecutter.org_name | replace(' ', '_') | replace('-', '_') | lower }}",
+  "experiment_name": "YYYY_MM_DD_CellLine_Assay",
+  "include_example_pipelines": ["yes", "no"],
+  "include_example_notebooks": ["yes", "no"],
+  "include_example_models": ["yes", "no"]
 }
