@@ -1,22 +1,51 @@
-# --- Dados brutos / muito pesados ---
+# --- Raw / heavy data ---
 images/
 workspace/backend/*/*.sqlite
 workspace/backend/*/*.db
 workspace/backend/*/*single_cell*.csv
+workspace/backend/*/*.sqlite-journal
+workspace/backend/*/*-wal
+workspace/backend/*/*-shm
 workspace_dl/**/checkpoints/
+workspace_dl/**/runs/
 
-# --- Temporários / cache ---
+# Safety: raw microscope formats anywhere (in case something lands outside images/)
+*.tif
+*.tiff
+*.nd2
+*.czi
+*.lif
+*.ome.tif
+*.ome.tiff
+
+# Large model/checkpoint files
+*.pt
+*.pth
+*.onnx
+*.h5
+*.ckpt
+
+# --- Notebooks / caches / temp ---
 **/.ipynb_checkpoints/
 **/__pycache__/
 *.pyc
+*.pyo
 *.tmp
+*.temp
+.cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+coverage.xml
+.coverage
+htmlcov/
 
-# --- Ambientes locais ---
+# --- Local envs ---
 .venv/
 .env
 .env.*
 
-# --- SO / IDE ---
+# --- OS / IDE ---
 .DS_Store
 Thumbs.db
 .vscode/
@@ -25,5 +54,4 @@ Thumbs.db
 # --- Logs ---
 *.log
 
-# --- Opcional: manter estruturas vazias ---
-# (usamos .gitkeep para pastas vazias)
+# --- Optional: keep empty dirs with .gitkeep ---
