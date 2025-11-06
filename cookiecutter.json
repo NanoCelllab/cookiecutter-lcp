@@ -1,47 +1,16 @@
 {
-  // REQUIRED: who is creating the repo (for README headers, etc.)
   "author_name": "Your Name",
   "author_email": "you@example.com",
   "org_name": "nanocell-interactions-lab-unicamp",
-
-  // REQUIRED: short, lower-case modality tag for this repo
-  // examples: lcp, hca, bioinfo, other
-  "modality": ["lcp", "hca", "bioinfo", "other"],
-
-  // REQUIRED: high-level project tag (goes in repo name)
-  // examples: nanotoxicology, hepatotoxicity, screening
-  "project_tag": "nanotoxicology",
-
-  // OPTIONAL: one or more cell lines (comma-separated). Examples: "Huh7" or "Huh7, HepG2"
-  "cell_models": "",
-
-  // OPTIONAL: tissue/organ or thematic scope. Examples: "liver", "hepatotoxicity"
-  "tissue": "",
-
-  // OPTIONAL: choose which perturbation category applies (drives which extra field is considered)
-  "perturbation_category": ["none", "nanoparticle", "drug", "genetic", "other"],
-
-  // OPTIONAL (used only if perturbation_category == nanoparticle). Example: npps, agnp, ldhnp
-  "nanoparticle": "",
-
-  // OPTIONAL (used only if perturbation_category == drug). Example: doxorubicin
-  "drug": "",
-
-  // OPTIONAL (used only if perturbation_category == genetic). Example: CRISPR-TP53, siRNA-ATG5
-  "genetic": "",
-  
-  // OPTIONAL (don't know)
-  "_year": "2025",
-
-  // AUTO: Build repo_name from the filled pieces (skips empty parts)
-  // If multiple cell lines were provided (comma present), we label as "multi-cell".
-  "repo_name": "{{ cookiecutter.modality | lower }}-{{ cookiecutter.project_tag | lower | replace(' ', '-') }}{{ '-' + (cookiecutter.tissue | lower | replace(' ', '-')) if cookiecutter.tissue else '' }}{{ '-multi-cell' if (cookiecutter.cell_models and (',' in cookiecutter.cell_models)) else ('-' + (cookiecutter.cell_models.split(',')[0] | trim | lower | replace(' ', '-')) ) if cookiecutter.cell_models else '' }}{{ '-' + (cookiecutter.nanoparticle | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'nanoparticle' and cookiecutter.nanoparticle else '' }}{{ '-' + (cookiecutter.drug | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'drug' and cookiecutter.drug else '' }}{{ '-' + (cookiecutter.genetic | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'genetic' and cookiecutter.genetic else '' }}",
-
-  // REQUIRED: license choice (we’ll handle file generation/removal in hooks)
-  "license": ["MIT", "Apache-2.0", "BSD-3-Clause", "None (private)"],
-
-  // Example assets (optional)
+  "project_focus": "nanoplastics-polystyrene",
+  "cell_model": "Huh7",
+  "experiment_date": "YYYY_MM_DD",
+  "treatment": "NPPS",
+  "condition": "24h",
+  "experiment_name": "{{ cookiecutter.experiment_date }}_{{ cookiecutter.cell_model | replace(' ', '-') }}_{{ cookiecutter.treatment | replace(' ', '-') }}_{{ cookiecutter.condition | replace(' ', '-') }}",
+  "repo_name": "lcp-{{ cookiecutter.project_focus | lower | replace(' ', '-') }}-{{ cookiecutter.cell_model | lower | replace(' ', '-') }}",
   "include_example_pipelines": ["yes", "no"],
   "include_example_notebooks": ["yes", "no"],
-  "include_example_models": ["yes", "no"]
+  "include_example_models": ["yes", "no"],
+  "license": ["MIT", "Apache-2.0", "BSD-3-Clause", "None (private)"]
 }
