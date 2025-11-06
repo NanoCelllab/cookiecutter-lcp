@@ -1,0 +1,66 @@
+# Template de metadados para o ensaio Live Cell Painting
+# Copie este arquivo e preencha os campos abaixo antes de rodar o pipeline.
+# Campos obrigatórios: Cell_Type, Treatment, Concentration, Control_Type
+# Exemplo:
+# Huh7    NPPS    10 ug/mL    Treated
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
+Cell_Type
+Treatment
+Concentration
+Control_Type
+
