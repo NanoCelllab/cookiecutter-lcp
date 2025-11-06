@@ -3,16 +3,16 @@
   "author_email": "you@example.com",
   "org_name": "nanocell-interactions-lab-unicamp",
 
-  "modality": ["lcp", "hca", "bioinfo", "other"],
+  "modality": "lcp",  
   "project_tag": "nanotoxicology",
   "cell_models": "",
   "tissue": "",
-  "perturbation_category": ["none", "nanoparticle", "drug", "genetic", "other"],
+  "perturbation_category": "",  
   "nanoparticle": "",
   "drug": "",
   "genetic": "",
 
-  "repo_name": "{{ cookiecutter.modality | lower }}-{{ cookiecutter.project_tag | lower | replace(' ', '-') }}{{ '-' + (cookiecutter.tissue | lower | replace(' ', '-')) if cookiecutter.tissue else '' }}{{ '-multi-cell' if (cookiecutter.cell_models and (',' in cookiecutter.cell_models)) else ('-' + (cookiecutter.cell_models.split(',')[0] | trim | lower | replace(' ', '-')) ) if cookiecutter.cell_models else '' }}{{ '-' + (cookiecutter.nanoparticle | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'nanoparticle' and cookiecutter.nanoparticle else '' }}{{ '-' + (cookiecutter.drug | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'drug' and cookiecutter.drug else '' }}{{ '-' + (cookiecutter.genetic | lower | replace(' ', '-')) if cookiecutter.perturbation_category == 'genetic' and cookiecutter.genetic else '' }}",
+  "repo_name": "{{ cookiecutter.modality | lower | replace(' ', '-') }}-{{ cookiecutter.project_tag | lower | replace(' ', '-') }}{{ '-' + (cookiecutter.tissue | lower | replace(' ', '-')) if cookiecutter.tissue else '' }}{{ '-multi-cell' if (cookiecutter.cell_models and (',' in cookiecutter.cell_models)) else ('-' + (cookiecutter.cell_models.split(',')[0] | trim | lower | replace(' ', '-')) ) if cookiecutter.cell_models else '' }}{{ '-' + (cookiecutter.nanoparticle | lower | replace(' ', '-')) if cookiecutter.nanoparticle else '' }}{{ '-' + (cookiecutter.drug | lower | replace(' ', '-')) if cookiecutter.drug else '' }}{{ '-' + (cookiecutter.genetic | lower | replace(' ', '-')) if cookiecutter.genetic else '' }}",
 
   "license": ["MIT", "Apache-2.0", "BSD-3-Clause", "None (private)"],
   "include_example_pipelines": ["yes", "no"],
