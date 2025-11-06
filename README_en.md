@@ -1,90 +1,78 @@
-# 🍪🔬 Live Cell Painting — HCA Project
+# 🍪🔬 Live Cell Painting / HCA — Project Scaffold
 
-Welcome! This repository is your **main project** for *High Content Analysis (HCA)* using **Live Cell Painting (LCP)**.  
-The idea is simple: you’ll have **one repository for your entire research project**, and **each experiment** becomes a separate folder named with the date, cell line, and assay (e.g., `2025_05_09_Huh7_NPPS_24h`), appearing **in parallel** under `images/`, `workspace/`, and `workspace_dl/`.
+Welcome! This repository is the **umbrella project** for your graduate research (MSc/PhD).  
+You will keep **all experiments of your project here**, and each experiment lives in its own dated folder (e.g., `2025_05_09_Huh7_NPPS_24h`) mirrored across `images/`, `workspace/`, and `workspace_dl/`.
 
-> 💡 **GitHub is for versioning code and text files** (tracking script and metadata changes).  
-> ⚠️ **Do not upload raw microscopy images or large files!** Store them in [REDU (Unicamp)](https://redu.unicamp.br) or your institutional repository.
-
----
-
-## 📂 Repository structure
-
-```
-<repo_root>/
-├─ images/
-│  └─ <experiment>/images/, illum/
-├─ workspace/
-│  ├─ metadata/<experiment>/barcode_platemap.csv, platemap/
-│  ├─ pipelines/<experiment>/{assaydev.cppipe, analysis.cppipe, illum.cppipe}
-│  ├─ assaydev/<experiment>/outlines_qc/
-│  ├─ load_data_csv/<experiment>/
-│  ├─ analysis/<experiment>/analysis/
-│  ├─ profiles/<experiment>/
-│  ├─ backend/<experiment>/
-│  ├─ models/
-│  └─ cellpose/
-└─ workspace_dl/
-   └─ <experiment>/notebooks/
-```
+> 💡 **GitHub is for versioning code, metadata and light artifacts.**  
+> ⚠️ **Do not push raw microscopy images or large binaries.** Store them in institutional storage (e.g., REDU/Unicamp) and keep only paths/metadata here.
 
 ---
 
-## 🚀 Steps
+## 🚀 Step 1 — Define your experiment name
 
-1️⃣ **Create an experiment**
+Each experiment must have a **unique identifier** stored in a variable called `EXP`.  
+It defines the folder names under `images/`, `workspace/`, and `workspace_dl/`.
+
+Use the convention:
+```
+YYYY_MM_DD_CellLine_Perturbation_Time
+```
+
+Examples:
+- `2025_06_28_Huh7_NPPS_24h`
+- `2025_06_28_HepG2_Doxo_48h`
+- `2025_06_28_Huh7_Caco2_AgNP_72h`
+
+> 📘 Start with the **year** to keep folders sorted chronologically.  
+> 🧠 Be descriptive but concise: include the **cell line**, **perturbation**, and **exposure time**.
+
+Copy this snippet to define your experiment (edit the name only):
+
 ```bash
-mkdir -p images/2025_05_09_Huh7_NPPS_24h/{images,illum}
-mkdir -p workspace/{metadata,pipelines,assaydev,load_data_csv,analysis,profiles,backend}/2025_05_09_Huh7_NPPS_24h
-mkdir -p workspace_dl/2025_05_09_Huh7_NPPS_24h/notebooks
+# Define your experiment
+EXP=2025_06_28_Huh7_NPPS_24h
 ```
 
-2️⃣ **Add raw microscopy images**
-- `images/<experiment>/images/`
-- `images/<experiment>/illum/`
+---
 
-3️⃣ **Generate metadata**
-- Use Load Data Generator & Layout Generator to create CSVs  
-- Save in:
+## 🚀 Step 2 — Create all folders for your experiment
+
+After defining `$EXP`, copy and paste this block to create the full structure:
+
+```bash
+# Raw images and (optional) illumination correction
+mkdir -p images/$EXP/images
+mkdir -p images/$EXP/illum
+
+# Metadata and LoadData
+mkdir -p workspace/metadata/$EXP/platemap
+mkdir -p workspace/load_data_csv/$EXP
+
+# Pipelines (.cppipe)
+mkdir -p workspace/pipelines/$EXP
+
+# Assay development (QC) and analysis
+mkdir -p workspace/assaydev/$EXP/outlines_qc
+mkdir -p workspace/analysis/$EXP/analysis
+
+# Backend outputs and profiles
+mkdir -p workspace/backend/$EXP
+mkdir -p workspace/profiles/$EXP
+
+# Deep learning notebooks (optional)
+mkdir -p workspace_dl/$EXP/notebooks
 ```
-workspace/load_data_csv/<experiment>/
-workspace/metadata/<experiment>/
+
+Check the result with:
+```bash
+tree -L 3
 ```
-
-4️⃣ **Prepare analysis**
-- `assaydev.cppipe` → test & QC  
-- `analysis.cppipe` → full feature extraction  
-- `illum.cppipe` → optional illumination correction
-
-5️⃣ **Results**
-| Data type | Path |
-|------------|------|
-| Single-cell CSVs | workspace/analysis/<experiment>/analysis/ |
-| Aggregated profiles | workspace/profiles/<experiment>/ |
-| SQLite databases | workspace/backend/<experiment>/ |
 
 ---
 
 ## ✅ Best practices
-- **Naming:** `YYYY_MM_DD_CellLine_Assay` (no spaces or accents).  
-- **Version control:** commit only scripts, metadata, and light files.  
-- **Data storage:** keep raw data in REDU.  
-- **Reproducibility:** update metadata, notebooks, and pipelines.
 
----
-
-## 🔗 Useful links
-- [CellProfiler docs](https://cellprofiler.org/)
-- [pycytominer](https://github.com/cytomining/pycytominer)
-- [Cell Painting Gallery structure](https://broadinstitute.github.io/cellpainting-gallery/data_structure.html)
-- [REDU (Unicamp)](https://redu.unicamp.br)
-
----
-
-## 🧩 Quick checklist
-- [ ] Created `<experiment>` folders in all roots
-- [ ] Added raw images
-- [ ] Generated `load_data.csv` and platemap
-- [ ] Ran QC + analysis pipelines
-- [ ] Pushed only lightweight files
-- [ ] Archived data in REDU
+- **Naming**: `YYYY_MM_DD_CellLine_Treatment_Condition`  
+- **Version control**: commit only scripts, metadata, and light files.  
+- **Heavy data**: archive images in REDU.  
+- **Reproducibility**: keep pipeline versions and metadata together.
