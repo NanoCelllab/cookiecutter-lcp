@@ -34,4 +34,10 @@ for name, val in fields.items():
     if not safe_pat.fullmatch(val):
         fail(f"{name} has invalid characters. Allowed: letters, numbers, '-', '_', '.'. Got: '{val}'")
 
-print("✔ Pre-generation checks passed.")
+def safe_print(msg: str) -> None:
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode("ascii", "replace").decode("ascii"))
+
+safe_print("✔ Pre-generation checks passed.")
