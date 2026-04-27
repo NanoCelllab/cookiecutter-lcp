@@ -1,42 +1,48 @@
-# 🔬 Scientific Project Scaffold — Reproducible Research Template
+# 🔬 Scientific Project Scaffold — Reproducible Research Template (NanoCell)
 
-This repository provides a **structured and reproducible foundation** for your scientific project (e.g., MSc, PhD, or independent research).  
-It serves as an **umbrella project**, grouping all related experiments, metadata, and analyses in a consistent layout.
+This repository provides a **structured and reproducible foundation** for scientific projects (MSc, PhD, or independent research).
+It is designed as an **umbrella repository**, grouping experiments, metadata, and analyses in a consistent layout.
+
+> 🔬 This template reflects the organizational, analytical, and reproducibility practices of the NanoCell Interactions Lab (UNICAMP).
 
 ---
 
 ## 💡 Why a single umbrella repository?
 
-- Keeps your **entire research history** (metadata, pipelines, notebooks, analysis outputs) in one place.  
-- Enables **comparison between experiments** and consistent reuse of analysis tools.  
-- Supports **FAIR and reproducible research** practices — lightweight data and scripts are versioned; heavy data are archived elsewhere.  
+- Keeps your **entire research history** (metadata, pipelines, notebooks, analyses) in one place.
+- Enables **comparison between experiments** and consistent reuse of tools.
+- Supports **FAIR and reproducible research** — lightweight data and code are versioned; heavy data are stored externally.
 
-> 📘 The repository name should be **general**, not experiment-specific.  
-> Examples:  
-> - `hca-nanotoxicology`  
-> - `bioinfo-transcriptomics`  
-> - `cp-senescence-multi-cell`  
+> 📘 The repository name should be **general**, not experiment-specific.
 
-If using multiple cell lines, join them with an underscore (e.g., `Huh7_Caco2`). Avoid spaces and special characters.
+Examples:
+- `hca-nanotoxicology`
+- `bioinfo-transcriptomics`
+- `cp-senescence-multi-cell`
+
+If using multiple cell lines, use underscores (e.g., `Huh7_Caco2`). Avoid spaces and special characters.
 
 ---
 
 ## 📂 Repository layout
 
-Each experiment is stored as a folder named:  
-`YYYY_MM_DD_CellLine_Perturbation_Time`  
-(e.g., `2025_05_09_Huh7_NPPS_24h`).
+Each experiment is stored in a folder named:
+
+`YYYY_MM_DD_CellLine_Perturbation_Time`
+
+Example:
+`2025_05_09_Huh7_NPPS_24h`
 
 ```
 <repo_root>/
 ├─ images/
 │  └─ <experiment>/
 │     ├─ images/         # raw microscopy images
-│     └─ illum/          # optional illumination correction
+│     └─ illum/          # illumination correction (optional)
 ├─ workspace/
-│  ├─ metadata/<experiment>/     # barcodes, platemaps
-│  ├─ load_data_csv/<experiment>/ # LoadData CSVs
-│  ├─ pipelines/<experiment>/     # CellProfiler pipelines (.cppipe)
+│  ├─ metadata/<experiment>/
+│  ├─ load_data_csv/<experiment>/
+│  ├─ pipelines/<experiment>/
 │  ├─ assaydev/<experiment>/outlines_qc/
 │  ├─ analysis/<experiment>/analysis/
 │  ├─ profiles/<experiment>/
@@ -49,90 +55,120 @@ Each experiment is stored as a folder named:
 
 ---
 
-## ⚙️ About the Cookiecutter prompts
+## 🧪 Computational environment (NanoCell standard)
 
-When you create the repository with `cookiecutter`, you will be asked for several fields.
+This template uses **Pixi** to manage a reproducible computational environment for HCI/HCA data analysis.
 
-### Guidelines
-- **Required**: used for folder or repository naming (e.g., `modality`, `project_tag`).  
-- **Optional**: domain-specific details that help describe your project (e.g., `tissue`, `drug`, `nanoparticle`).  
-- **Defaults**: the value in parentheses will be used if you press **Enter**.  
-- **Multiple cell lines**: use underscores (e.g., `Huh7_Caco2`).
+The standard NanoCell environment, `hca-analysis`, is designed for:
+
+- notebooks (JupyterLab)
+- tabular profile analysis
+- quality control (QC)
+- pycytominer workflows
+- copairs / mAP analysis
+- classical machine learning
+- visualization and statistics
+
+Core files:
+
+```
+pixi.toml   # environment recipe
+pixi.lock   # exact resolved versions
+.pixi/      # local environment (not versioned)
+```
+
+### Usage
+
+Install environment:
+
+```bash
+pixi install
+```
+
+Start JupyterLab:
+
+```bash
+pixi run lab
+```
+
+Check environment:
+
+```bash
+pixi run check
+```
+
+### Best practices
+
+- **Never commit `.pixi/`**
+- **Always version `pixi.toml` and `pixi.lock`**
+- **Do not update the main environment casually**
+
+> ⚠️ Always test updates in a separate branch before modifying the main environment.
 
 ---
 
-## 🚀 Step 1 — Define your experiment name
+## ⚙️ Cookiecutter prompts
 
-Each experiment must have a **unique identifier**, stored in a variable called `EXP`.
+When creating the project:
+
+- **Required fields:** used for naming
+- **Optional fields:** help describe the project
+- **Defaults:** used if you press Enter
+- **Multiple cell lines:** use underscores (`Huh7_Caco2`)
+
+---
+
+## 🚀 Step 1 — Define experiment
+
+Each experiment must have a unique identifier:
 
 ```
 YYYY_MM_DD_CellLine_Perturbation_Time
 ```
 
-**Examples:**
-- 2025_06_28_Huh7_NPPS_24h  
-- 2025_06_28_HepG2_Doxo_48h  
-- 2025_06_28_Huh7_Caco2_AgNP_72h
-
-> 💡 Start with the **year (YYYY)** to keep folders sorted chronologically.  
-> Include cell line, perturbation (NP, drug, or condition), and time point.
-
-Define it in your terminal (edit the name only):
+Example:
 
 ```bash
-# Define your experiment
 EXP=2025_06_28_Huh7_NPPS_24h
 ```
 
 ---
 
-## 🚀 Step 2 — Create all folders for your experiment
-
-Once `$EXP` is set, create the full structure automatically:
+## 🚀 Step 2 — Create structure
 
 ```bash
-# Raw images and illumination correction
 mkdir -p images/$EXP/images
 mkdir -p images/$EXP/illum
 
-# Metadata and LoadData
 mkdir -p workspace/metadata/$EXP/platemap
 mkdir -p workspace/load_data_csv/$EXP
 
-# Pipelines (.cppipe)
 mkdir -p workspace/pipelines/$EXP
 
-# QC and analysis
 mkdir -p workspace/assaydev/$EXP/outlines_qc
 mkdir -p workspace/analysis/$EXP/analysis
 
-# Backend and profiles
 mkdir -p workspace/backend/$EXP
 mkdir -p workspace/profiles/$EXP
 
-# Deep learning (optional)
 mkdir -p workspace_dl/$EXP/notebooks
-```
-
-Check the result with:
-```bash
-tree -L 3
 ```
 
 ---
 
 ## ✅ Best practices
 
-- **Naming:** `YYYY_MM_DD_CellLine_Treatment_Condition`  
-- **Version control:** commit only scripts, metadata, and light files.  
-- **Heavy data:** store microscopy images and outputs in institutional storage (e.g., REDU/Unicamp).  
-- **Reproducibility:** keep pipelines and metadata under version control.
+- **Naming:** `YYYY_MM_DD_CellLine_Treatment_Condition`
+- **Version control:** track scripts, metadata, and environment
+- **Heavy data:** store externally (e.g., REDU)
+- **Reproducibility:** version pipelines, notebooks, and environment
 
 ---
 
 ## 🔗 Useful links
 
-- [CellProfiler](https://cellprofiler.org)  
-- [pycytominer](https://github.com/cytomining/pycytominer)  
-- [Cell Painting Gallery](https://broadinstitute.github.io/cellpainting-gallery/data_structure.html)  
-- [REDU (Unicamp)](https://redu.unicamp.br)
+- CellProfiler: https://cellprofiler.org
+- pycytominer: https://github.com/cytomining/pycytominer
+- Cell Painting Gallery: https://broadinstitute.github.io/cellpainting-gallery/data_structure.html
+- REDU (Unicamp): https://redu.unicamp.br
+

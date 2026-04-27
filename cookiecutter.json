@@ -16,5 +16,7 @@
 
   "include_example_pipelines": ["yes", "no"],
   "include_example_notebooks": ["yes", "no"],
-  "include_example_models": ["yes", "no"]
+  "include_example_models": ["yes", "no"],
+  "use_pixi": ["yes", "no"],
+  "pixi_env_type": ["hca-analysis", "minimal"]
 }

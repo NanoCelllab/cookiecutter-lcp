@@ -6,6 +6,10 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+.pixi/
+
+# Keep Pixi lockfile tracked
+!pixi.lock
 
 # Artefatos de teste do cookiecutter
 cookiecutter_test/
@@ -15,4 +19,3 @@ cookiecutter_test/
 .vscode/
 .idea/
 Thumbs.db
-
