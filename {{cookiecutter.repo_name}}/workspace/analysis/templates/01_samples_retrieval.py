@@ -1,0 +1,1403 @@
+import marimo
+
+__generated_with = "0.23.15"
+app = marimo.App(width="medium")
+
+
+@app.cell
+def _():
+    import marimo as mo
+
+    return (mo,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    # 01 — Samples Retrieval
+
+    **Pipeline step:** 1 of 6
+    **Purpose:** retrieve, validate, consolidate, and document the raw
+    single-cell profiles used by the downstream analysis.
+
+    > This notebook performs **structural validation and quality-control
+    > reporting only**. It does not normalize, aggregate, impute, or
+    > select features. Those transformations belong to NB02.
+
+    ## Input and output
+
+    **Current input mode:** legacy merged single-cell CSV
+    **Primary output:** `single_cell_profiles.parquet`
+    **Interoperability output:** `single_cell_profiles.csv`
+    **QC outputs:** cell-count table, plate maps, feature-integrity report
+    **Provenance output:** `provenance_nb01_latest.json`
+
+    ## Execution logic
+
+    1. Configure the experiment (widgets below) and validate the choice.
+    2. Locate and read the experiment input.
+    3. Reconstruct the plate-level datasets.
+    4. Run blocking structural validations (SC-01 → SC-03).
+    5. Report non-blocking cell-count QC findings (SC-04).
+    6. Generate plate maps using a shared color scale (SC-05).
+    7. Summarize cell counts and protect the export.
+    8. Diagnose missing and infinite feature values.
+    9. Safely export outputs without silent overwriting.
+    10. Record provenance and run final integrity checks.
+
+    ## Validation policy
+
+    | Type | Examples | Behaviour |
+    |---|---|---|
+    | **Blocking validation** | missing plate/well metadata, incompatible plate schemas, invalid well identifiers | stop execution with an error |
+    | **QC warning** | wells below the minimum cell count, partially missing features, infinite values | report and preserve data for NB02 |
+    | **Output protection** | existing output differs from the current in-memory result | do not overwrite unless explicitly enabled |
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 0 — Imports and shared utilities
+    """)
+    return
+
+
+@app.cell
+def _():
+    import json
+    import platform
+    import re
+    import subprocess
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from typing import Sequence
+
+    import matplotlib.patches as patches
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from matplotlib.colors import Normalize
+
+    pd.set_option("display.max_columns", 200)
+    return (
+        Normalize,
+        Path,
+        Sequence,
+        datetime,
+        json,
+        np,
+        patches,
+        pd,
+        platform,
+        plt,
+        re,
+        replace,
+        subprocess,
+        timezone,
+    )
+
+
+@app.cell
+def _(Path):
+    # Locate the repo root before hca_pipeline can be imported (bootstrap:
+    # can't import find_repo_root from the package until sys.path includes
+    # workspace). __file__ is used instead of cwd so this notebook
+    # behaves identically under `marimo edit`, a plain `python` run, or an
+    # automated headless run from any working directory.
+    import sys
+
+    _notebook_path = Path(__file__).resolve()
+    _repo_root_candidate = None
+    for _p in (_notebook_path, *_notebook_path.parents):
+        if (_p / "pixi.toml").exists() or (_p / ".git").exists() or (_p / "pixi.lock").exists():
+            _repo_root_candidate = _p
+            break
+    if _repo_root_candidate is None:
+        raise FileNotFoundError(
+            "Could not find repo root (pixi.toml / .git / pixi.lock) starting "
+            f"from {_notebook_path}. Ensure this notebook lives inside the project."
+        )
+
+    REPO_ROOT = _repo_root_candidate
+    _pipelines_dir = REPO_ROOT / "workspace"
+    if not (_pipelines_dir / "hca_pipeline").exists():
+        raise FileNotFoundError(f"hca_pipeline package directory not found: {_pipelines_dir / 'hca_pipeline'}")
+    sys.path.insert(0, str(_pipelines_dir))
+
+    from hca_pipeline.config import (
+        SUPPORTED_PLATE_FORMATS,
+        COMPARTMENT_PREFIXES,
+        ExperimentConfig,
+        validate_configuration,
+    )
+    from hca_pipeline.io import (
+        write_parquet_protected,
+        write_csv_protected,
+        write_summary_table_protected,
+    )
+    from hca_pipeline.metadata import (
+        norm_well,
+        ensure_core_metadata,
+        read_barcode_platemap,
+        read_platemap_layout,
+    )
+    from hca_pipeline.feature_select import infer_feature_cols
+
+    print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
+    return (
+        COMPARTMENT_PREFIXES,
+        ExperimentConfig,
+        REPO_ROOT,
+        SUPPORTED_PLATE_FORMATS,
+        ensure_core_metadata,
+        infer_feature_cols,
+        norm_well,
+        read_barcode_platemap,
+        read_platemap_layout,
+        validate_configuration,
+        write_csv_protected,
+        write_parquet_protected,
+        write_summary_table_protected,
+    )
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 1 — Experiment configuration
+
+    Pick the experiment folder and confirm the plate geometry and QC
+    threshold. Defaults are pre-filled from a previously saved
+    `experiment_config.json` when one exists, so re-running this
+    notebook (or moving on to later pipeline steps) doesn't require
+    re-entering the same choices.
+    """)
+    return
+
+
+@app.cell
+def _(REPO_ROOT, mo):
+    _backend_dir = REPO_ROOT / "workspace" / "backend"
+    available_experiment_ids = (
+        sorted(p.name for p in _backend_dir.iterdir() if p.is_dir())
+        if _backend_dir.is_dir()
+        else []
+    )
+    _default_experiment_id = (
+        available_experiment_ids[0] if available_experiment_ids else "SET_EXPERIMENT_ID_HERE"
+    )
+
+    experiment_id_input = mo.ui.dropdown(
+        options=available_experiment_ids or [_default_experiment_id],
+        value=_default_experiment_id,
+        label="Experiment ID",
+    )
+    experiment_id_input
+    return (experiment_id_input,)
+
+
+@app.cell
+def _(ExperimentConfig, REPO_ROOT, experiment_id_input):
+    loaded_config = ExperimentConfig.load(REPO_ROOT, experiment_id_input.value)
+    return (loaded_config,)
+
+
+@app.cell
+def _(SUPPORTED_PLATE_FORMATS, loaded_config, mo):
+    plate_format_input = mo.ui.dropdown(
+        options=[str(k) for k in sorted(SUPPORTED_PLATE_FORMATS)],
+        value=str(loaded_config.plate_format),
+        label="Plate format (wells)",
+    )
+    min_cells_input = mo.ui.number(
+        value=loaded_config.min_cells_per_well,
+        start=1,
+        stop=100_000,
+        label="Minimum cells per well",
+    )
+    channels_input = mo.ui.multiselect(
+        options=["GFP", "PI", "Hoechst", "DAPI", "Brightfield"],
+        value=loaded_config.channels or ["GFP", "PI"],
+        label="Imaging channels used (saved for later pipeline steps)",
+    )
+    overwrite_input = mo.ui.checkbox(
+        value=loaded_config.overwrite_existing_outputs,
+        label="Overwrite existing outputs",
+    )
+    save_history_input = mo.ui.checkbox(
+        value=loaded_config.save_provenance_history,
+        label="Save timestamped provenance history",
+    )
+    mo.vstack(
+        [
+            plate_format_input,
+            min_cells_input,
+            channels_input,
+            overwrite_input,
+            save_history_input,
+        ]
+    )
+    return (
+        channels_input,
+        min_cells_input,
+        overwrite_input,
+        plate_format_input,
+        save_history_input,
+    )
+
+
+@app.cell
+def _(
+    REPO_ROOT,
+    channels_input,
+    experiment_id_input,
+    loaded_config,
+    min_cells_input,
+    overwrite_input,
+    plate_format_input,
+    replace,
+    save_history_input,
+    validate_configuration,
+):
+    EXPERIMENT_ID = experiment_id_input.value
+    PLATE_FORMAT = int(plate_format_input.value)
+    MIN_CELLS_PER_WELL = int(min_cells_input.value)
+
+    BACKEND_DIR = REPO_ROOT / "workspace" / "backend"
+    validate_configuration(
+        experiment_id=EXPERIMENT_ID,
+        plate_format=PLATE_FORMAT,
+        min_cells_per_well=MIN_CELLS_PER_WELL,
+        experiments_dir=BACKEND_DIR,
+    )
+
+    CONFIG = replace(
+        loaded_config,
+        experiment_id=EXPERIMENT_ID,
+        plate_format=PLATE_FORMAT,
+        min_cells_per_well=MIN_CELLS_PER_WELL,
+        channels=list(channels_input.value),
+        overwrite_existing_outputs=bool(overwrite_input.value),
+        save_provenance_history=bool(save_history_input.value),
+    )
+    _config_path = CONFIG.save(REPO_ROOT)
+
+    print("═" * 72)
+    print("CONFIGURATION VALIDATED")
+    print("═" * 72)
+    print(f"  Experiment ID:       {EXPERIMENT_ID}")
+    print(f"  Plate format:        {PLATE_FORMAT}-well")
+    print(f"  Minimum cells/well:  {MIN_CELLS_PER_WELL}")
+    print(f"  Channels:            {', '.join(CONFIG.channels) or '(none selected)'}")
+    print(f"  Repository root:     {REPO_ROOT}")
+    print(f"  Saved config:        {_config_path}")
+    return CONFIG, EXPERIMENT_ID, MIN_CELLS_PER_WELL, PLATE_FORMAT
+
+
+@app.cell
+def _(EXPERIMENT_ID, REPO_ROOT):
+    WORKSPACE_DIR = REPO_ROOT / "workspace"
+    ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
+    PROFILES_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID
+    DB_ROOT = WORKSPACE_DIR / "backend" / EXPERIMENT_ID
+
+    OUTPUT_DIR = ANALYSIS_DIR / "outputs"
+    RESULTS_DIR = ANALYSIS_DIR / "results"
+    FIGS_DIR = ANALYSIS_DIR / "figures" / "sample_retrieval"
+
+    OUTPUT_CSV = OUTPUT_DIR / "single_cell_profiles.csv"
+    OUTPUT_PARQUET = OUTPUT_DIR / "single_cell_profiles.parquet"
+    COUNTS_CSV = OUTPUT_DIR / "object_count_per_well.csv"
+
+    for _directory in (OUTPUT_DIR, RESULTS_DIR, FIGS_DIR):
+        _directory.mkdir(parents=True, exist_ok=True)
+
+    print(f"  Database directory:  {DB_ROOT}")
+    print(f"  Analysis directory:  {ANALYSIS_DIR}")
+    return (
+        COUNTS_CSV,
+        DB_ROOT,
+        FIGS_DIR,
+        OUTPUT_CSV,
+        OUTPUT_PARQUET,
+        RESULTS_DIR,
+    )
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 2 — Locate and validate the experiment input
+
+    This experiment predates the SQLite-per-plate workflow, so it is
+    loaded from one previously merged single-cell CSV. Rather than
+    hardcoding the CSV's file name, this cell requires exactly one CSV
+    to be present in the experiment's database folder — that keeps the
+    notebook agnostic to what any given legacy dataset happens to be
+    named.
+    """)
+    return
+
+
+@app.cell
+def _(DB_ROOT):
+    _candidate_csvs = sorted(DB_ROOT.glob("*.csv")) if DB_ROOT.is_dir() else []
+    if len(_candidate_csvs) != 1:
+        raise FileNotFoundError(
+            "Expected exactly one legacy single-cell CSV in "
+            f"{DB_ROOT}, found {len(_candidate_csvs)}: "
+            f"{[p.name for p in _candidate_csvs]}"
+        )
+    LEGACY_SINGLE_CELL_CSV = _candidate_csvs[0]
+    print("✓ Legacy single-cell input located")
+    print(f"  File: {LEGACY_SINGLE_CELL_CSV}")
+    return (LEGACY_SINGLE_CELL_CSV,)
+
+
+@app.cell
+def _(Path, ensure_core_metadata, norm_well, pd):
+    def read_legacy_single_cell_csv(csv_path: Path) -> pd.DataFrame:
+        """Read and validate a previously generated single-cell profile CSV.
+
+        Intended for legacy experiments in which CellProfiler compartment
+        tables were merged before the current SQLite-based pipeline was
+        standardized.
+        """
+        csv_path = Path(csv_path)
+
+        if not csv_path.is_file():
+            raise FileNotFoundError(
+                "\nLegacy single-cell CSV not found\n"
+                "================================\n\n"
+                f"Expected file:\n  {csv_path}\n\n"
+                "Check that the experiment's database folder contains it."
+            )
+
+        file_size_mb = csv_path.stat().st_size / (1024**2)
+        print("Reading legacy single-cell CSV")
+        print("--------------------------------")
+        print(f"  File:      {csv_path}")
+        print(f"  File size: {file_size_mb:,.2f} MB")
+
+        df = pd.read_csv(csv_path, low_memory=False)
+
+        if df.empty:
+            raise ValueError(f"{csv_path.name}: the CSV contains no rows.")
+
+        original_rows, original_columns = df.shape
+        print(f"  Raw data:  {original_rows:,} rows × {original_columns:,} columns")
+
+        # Remove accidental DataFrame index columns created during CSV export.
+        unnamed_columns = [c for c in df.columns if str(c).startswith("Unnamed:")]
+        if unnamed_columns:
+            df = df.drop(columns=unnamed_columns, errors="ignore")
+            print(f"  Cleanup:   removed {len(unnamed_columns)} exported index column(s)")
+        else:
+            print("  Cleanup:   no exported index columns detected")
+
+        # Standardize core metadata column names when possible.
+        original_column_names = set(df.columns)
+        df = ensure_core_metadata(df)
+        renamed_metadata = sorted(set(df.columns) - original_column_names)
+        if renamed_metadata:
+            print("  Metadata:  standardized core metadata column names")
+        else:
+            print("  Metadata:  core metadata columns already standardized")
+
+        required_metadata = ["Metadata_Plate", "Metadata_Well"]
+        missing_metadata = [c for c in required_metadata if c not in df.columns]
+        if missing_metadata:
+            raise ValueError(
+                "\nRequired metadata columns are missing\n"
+                "=====================================\n\n"
+                f"Missing columns:\n" + "\n".join(f"  - {c}" for c in missing_metadata)
+                + "\n\nAvailable metadata-like columns:\n"
+                + "\n".join(f"  - {c}" for c in df.columns if str(c).startswith("Metadata_"))
+            )
+
+        # Normalize plate and well identifiers.
+        df["Metadata_Plate"] = df["Metadata_Plate"].astype("string").str.strip()
+        df["Metadata_Well"] = df["Metadata_Well"].map(norm_well)
+
+        # Remove rows without usable plate or well identifiers.
+        invalid_metadata = (
+            df["Metadata_Plate"].isna()
+            | df["Metadata_Well"].isna()
+            | df["Metadata_Plate"].eq("")
+            | df["Metadata_Well"].eq("")
+        )
+        if invalid_metadata.any():
+            n_invalid = int(invalid_metadata.sum())
+            invalid_preview = (
+                df.loc[invalid_metadata, ["Metadata_Plate", "Metadata_Well"]]
+                .head(10)
+                .to_string(index=False)
+            )
+            raise ValueError(
+                "\nInvalid plate or well metadata detected\n"
+                "=======================================\n\n"
+                f"{n_invalid:,} row(s) have missing or invalid "
+                "Metadata_Plate/Metadata_Well values.\n\n"
+                f"First affected rows:\n{invalid_preview}"
+            )
+
+        return df
+
+    return (read_legacy_single_cell_csv,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 3 — Load the single-cell profiles and reconstruct plates
+
+    The CSV is read exactly once. `df_all` preserves the complete
+    single-cell table; `plate_dfs` provides one validated DataFrame per
+    plate for plate-level QC.
+    """)
+    return
+
+
+@app.cell
+def _(LEGACY_SINGLE_CELL_CSV, read_legacy_single_cell_csv):
+    df_all = read_legacy_single_cell_csv(LEGACY_SINGLE_CELL_CSV)
+    return (df_all,)
+
+
+@app.cell
+def _(df_all):
+    plate_dfs = {
+        str(plate_id): df_plate.reset_index(drop=True)
+        for plate_id, df_plate in df_all.groupby("Metadata_Plate", sort=True, observed=True)
+    }
+    if not plate_dfs:
+        raise ValueError("No plates could be reconstructed from Metadata_Plate.")
+
+    print("Loaded dataset")
+    print("==============")
+    print(f"  Cells:               {len(df_all):,}")
+    print(f"  Columns:             {df_all.shape[1]:,}")
+    print(f"  Plates:              {len(plate_dfs):,}")
+    print(
+        "  Unique wells:        "
+        f"{df_all[['Metadata_Plate', 'Metadata_Well']].drop_duplicates().shape[0]:,}"
+    )
+    print("\n  Cells by plate:")
+    for _plate_id, _df_plate in plate_dfs.items():
+        print(
+            f"    - {_plate_id}: {len(_df_plate):,} cells, "
+            f"{_df_plate['Metadata_Well'].nunique():,} wells"
+        )
+    return (plate_dfs,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 4 — Structural validation and cell-count QC
+
+    ### Blocking checks
+
+    - **SC-01:** each plate contains rows and columns.
+    - **SC-02:** all plates contain the same feature columns.
+    - **SC-03:** required plate and well metadata are present and complete.
+
+    ### Non-blocking check
+
+    - **SC-04:** wells below the configured minimum cell count are
+      reported but not removed.
+
+    A failure in SC-01–SC-03 stops execution. SC-04 produces a warning
+    for later review.
+    """)
+    return
+
+
+@app.cell
+def _(COMPARTMENT_PREFIXES, MIN_CELLS_PER_WELL, plate_dfs):
+    print("═" * 65)
+    print("SANITY CHECKS — NB01")
+    print("═" * 65)
+
+    # ── SC-01: Per-plate shape report ──────────────────────────────────────
+    print("\n── SC-01: Per-plate shape ──────────────────────────────────────")
+    sc01_pass = True
+    for _pid, _df_p in plate_dfs.items():
+        _n_cells, _n_cols = _df_p.shape
+        _status = "✓" if _n_cells > 0 and _n_cols > 0 else "✗"
+        if _n_cells == 0 or _n_cols == 0:
+            sc01_pass = False
+        print(f"  {_status}  {_pid}: {_n_cells:,} cells × {_n_cols} cols")
+    print(f"  SC-01: {'PASS' if sc01_pass else 'FAIL — check plates above'}")
+
+    # ── SC-02: Column consistency ───────────────────────────────────────────
+    # Uses the same COMPARTMENT_PREFIXES as infer_feature_cols, so this check
+    # and the feature-integrity diagnostic in Section 8 can never disagree
+    # about what counts as a feature column.
+    print("\n── SC-02: Column consistency ───────────────────────────────────")
+    feat_sets = {
+        _pid: {
+            c
+            for c in _df_p.columns
+            if c.startswith(COMPARTMENT_PREFIXES) and not c.startswith("Metadata_")
+        }
+        for _pid, _df_p in plate_dfs.items()
+    }
+    sc02_pass = len({frozenset(v) for v in feat_sets.values()}) == 1
+    if sc02_pass:
+        print(f"  ✓  All plates have identical feature columns ({len(next(iter(feat_sets.values())))} features)")
+    else:
+        print("  ❌  Column mismatch across plates:")
+        _all_cols = set().union(*feat_sets.values())
+        _common_cols = set.intersection(*feat_sets.values())
+        for _pid, _cols in feat_sets.items():
+            _missing = _all_cols - _cols
+            _extra = _cols - _common_cols
+            if _missing or _extra:
+                print(f"    {_pid}: missing {len(_missing)}, extra {len(_extra)}")
+        raise ValueError(
+            "Feature columns differ across plates (SC-02 FAIL). "
+            "Do not concatenate until the CellProfiler outputs are harmonized."
+        )
+    print("  SC-02: PASS")
+
+    # ── SC-03: Missing metadata ─────────────────────────────────────────────
+    print("\n── SC-03: Missing metadata ─────────────────────────────────────")
+    _blocking_cols = ["Metadata_Plate", "Metadata_Well"]
+    _nonblocking_cols = ["Metadata_Site"]
+    sc03_blocking_pass = True
+    sc03_nonblocking_pass = True
+    for _pid, _df_p in plate_dfs.items():
+        for _col in _blocking_cols:
+            if _col not in _df_p.columns:
+                print(f"  ✗  {_pid}: blocking column '{_col}' missing entirely")
+                sc03_blocking_pass = False
+            elif _df_p[_col].isna().any():
+                print(f"  ✗  {_pid}: blocking column '{_col}' has {_df_p[_col].isna().sum()} NaN values")
+                sc03_blocking_pass = False
+        for _col in _nonblocking_cols:
+            if _col not in _df_p.columns:
+                print(f"  ⚠️  {_pid}: non-blocking column '{_col}' missing (OK if single-site)")
+            elif _df_p[_col].isna().any():
+                print(f"  ⚠️  {_pid}: '{_col}' has {_df_p[_col].isna().sum()} NaN values (non-blocking)")
+                sc03_nonblocking_pass = False
+    if sc03_blocking_pass:
+        print("  ✓  No missing blocking metadata (Plate, Well) in any plate")
+    if not sc03_nonblocking_pass:
+        print("  ⚠️  Some non-blocking metadata (Site) has issues — OK for single-site pipelines")
+    if not sc03_blocking_pass:
+        raise ValueError(
+            "SC-03 FAIL: Metadata_Plate or Metadata_Well is missing or has NaN values. "
+            "These columns are required for downstream annotation and aggregation."
+        )
+    print(f"  SC-03: {'PASS' if sc03_blocking_pass else 'FAIL — blocking metadata missing'}")
+
+    # ── SC-04: Cell count per well ──────────────────────────────────────────
+    print("\n── SC-04: Cell count per well ───────────────────────────────────")
+    sc04_pass = True
+    low_wells = []
+    for _pid, _df_p in plate_dfs.items():
+        if "Metadata_Well" not in _df_p.columns:
+            print(f"  ⚠️  {_pid}: Metadata_Well missing — skipping SC-04")
+            continue
+        _counts = _df_p.groupby("Metadata_Well").size()
+        _low = _counts[_counts < MIN_CELLS_PER_WELL]
+        if not _low.empty:
+            sc04_pass = False
+            for _well, _n in _low.items():
+                low_wells.append((_pid, _well, _n))
+                print(f"  ⚠️  {_pid}  {_well}: {_n} cells (< {MIN_CELLS_PER_WELL})")
+    if sc04_pass:
+        print(f"  ✓  All wells have ≥ {MIN_CELLS_PER_WELL} cells")
+    print(f"  SC-04: {'PASS' if sc04_pass else f'WARN — {len(low_wells)} low-count well(s)'}")
+
+    print("\n" + "═" * 65)
+    print(
+        f"SC-01: {'PASS' if sc01_pass else 'FAIL'}  |  "
+        f"SC-02: {'PASS' if sc02_pass else 'FAIL'}  |  "
+        f"SC-03: {'PASS' if sc03_blocking_pass else 'FAIL'}  |  "
+        f"SC-04: {'PASS' if sc04_pass else 'WARN'}"
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 5 — Plate-level visual QC
+
+    SC-05 generates one cell-count plate map per plate. All maps use
+    the same upper color limit so that color intensity remains
+    directly comparable across plates.
+
+    Treatment labels (if shown) come from a best-effort, read-only lookup
+    of the platemap — NB01 itself never annotates `df_all`/`plate_dfs`
+    with treatment metadata (that's NB02's job); this only enriches the
+    QC image. If no platemap is found, plate maps fall back to cell
+    counts only.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    blur_plate_maps_input = mo.ui.checkbox(
+        value=False, label="Blur plate map image (smoothed heatmap instead of sharp per-well grid)"
+    )
+    show_treatment_labels_input = mo.ui.checkbox(
+        value=True, label="Show treatment labels on plate maps (if a platemap is available)"
+    )
+    mo.vstack([blur_plate_maps_input, show_treatment_labels_input])
+    return blur_plate_maps_input, show_treatment_labels_input
+
+
+@app.cell
+def _(
+    EXPERIMENT_ID,
+    WORKSPACE_DIR,
+    plate_dfs,
+    read_barcode_platemap,
+    read_platemap_layout,
+    show_treatment_labels_input,
+):
+    well_treatments_by_plate: dict[str, dict[str, str]] = {}
+    if show_treatment_labels_input.value:
+        _metadata_dir = WORKSPACE_DIR / "metadata" / EXPERIMENT_ID
+        _barcode_csv = _metadata_dir / "barcode_platemap.csv"
+        _platemap_dir = _metadata_dir / "platemap"
+        if _barcode_csv.exists() and _platemap_dir.is_dir():
+            try:
+                _barcode_index = read_barcode_platemap(_barcode_csv)
+                for _plate_id in plate_dfs:
+                    _row = _barcode_index.loc[_barcode_index["Metadata_Plate"] == _plate_id]
+                    if _row.empty:
+                        continue
+                    _pm_path = _platemap_dir / _row["filename"].iloc[0]
+                    if not _pm_path.exists():
+                        continue
+                    _pm = read_platemap_layout(_pm_path)
+                    well_treatments_by_plate[_plate_id] = dict(
+                        zip(_pm["Metadata_Well"], _pm["Metadata_Treatment"].astype(str))
+                    )
+                print(f"  ✓  Loaded treatment labels for {len(well_treatments_by_plate)}/{len(plate_dfs)} plate(s)")
+            except Exception as error:
+                print(f"  ⚠️  Could not load treatment labels for plate maps: {error}")
+        else:
+            print("  ℹ️  Platemap not found — plate maps will show cell counts only")
+    return (well_treatments_by_plate,)
+
+
+@app.cell
+def _(Normalize, Path, np, patches, pd, plt, re):
+    def plot_cell_count_heatmap(
+        df_plate: pd.DataFrame,
+        plate_id: str,
+        out_dir: Path,
+        min_cells: int,
+        plate_format: int,
+        vmax: float | None = None,
+        smooth_image: bool = False,
+        well_treatments: dict[str, str] | None = None,
+    ) -> None:
+        """Plot a publication-friendly plate map of cell counts per well.
+
+        Wells below `min_cells` are outlined and marked with a warning symbol.
+        `smooth_image=True` renders the heatmap with smoothed (blurred)
+        interpolation between wells instead of the default sharp grid.
+        `well_treatments` (well ID -> label) optionally adds a treatment
+        label below the cell count for each well, when available.
+        """
+        if "Metadata_Well" not in df_plate.columns:
+            print(f"  ⚠️  {plate_id}: Metadata_Well is missing — skipping cell-count heatmap.")
+            return
+
+        plate_dimensions = {
+            6: ("AB", 3),
+            12: ("ABC", 4),
+            24: ("ABCD", 6),
+            48: ("ABCDEF", 8),
+            96: ("ABCDEFGH", 12),
+            384: ("ABCDEFGHIJKLMNOP", 24),
+        }
+        if plate_format not in plate_dimensions:
+            raise ValueError(
+                f"Unsupported plate format: {plate_format}. "
+                f"Supported formats: {sorted(plate_dimensions)}"
+            )
+
+        rows_string, n_columns = plate_dimensions[plate_format]
+        rows = list(rows_string)
+        columns = list(range(1, n_columns + 1))
+
+        counts = (
+            df_plate.groupby("Metadata_Well", observed=True)
+            .size()
+            .rename("Cell_Count")
+            .reset_index()
+        )
+        counts["Row"] = counts["Metadata_Well"].str.extract(r"^([A-Z])", expand=False)
+        counts["Column"] = pd.to_numeric(
+            counts["Metadata_Well"].str.extract(r"(\d+)$", expand=False), errors="coerce"
+        )
+
+        invalid_wells = (
+            counts["Row"].isna()
+            | counts["Column"].isna()
+            | ~counts["Row"].isin(rows)
+            | ~counts["Column"].isin(columns)
+        )
+        if invalid_wells.any():
+            raise ValueError(
+                f"{plate_id}: invalid well identifiers detected: "
+                f"{counts.loc[invalid_wells, 'Metadata_Well'].tolist()}"
+            )
+
+        grid = (
+            counts.pivot(index="Row", columns="Column", values="Cell_Count")
+            .reindex(index=rows, columns=columns)
+        )
+
+        values = grid.to_numpy(dtype=float)
+        observed_values = values[np.isfinite(values)]
+        if observed_values.size == 0:
+            print(f"  ⚠️  {plate_id}: no valid cell counts found — skipping heatmap.")
+            return
+
+        observed_max = float(np.nanmax(observed_values))
+        if vmax is None:
+            robust_max = float(np.nanpercentile(observed_values, 98))
+            plot_vmax = max(robust_max, float(min_cells), 1.0)
+        else:
+            plot_vmax = max(float(vmax), float(min_cells), 1.0)
+
+        norm = Normalize(vmin=0, vmax=plot_vmax, clip=True)
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad("#E8E8E8")
+
+        figure_width = max(8.0, n_columns * 0.72)
+        figure_height = max(4.8, len(rows) * 0.70)
+        fig, ax = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
+        image = ax.imshow(
+            values, cmap=cmap, norm=norm,
+            interpolation="gaussian" if smooth_image else "none",
+            aspect="equal",
+        )
+
+        ax.set_xticks(np.arange(n_columns))
+        ax.set_xticklabels(columns)
+        ax.set_yticks(np.arange(len(rows)))
+        ax.set_yticklabels(rows)
+        ax.xaxis.tick_top()
+        ax.xaxis.set_label_position("top")
+        ax.set_xlabel("Plate column", labelpad=10, fontsize=10)
+        ax.set_ylabel("Plate row", labelpad=10, fontsize=10)
+        ax.tick_params(axis="both", which="major", length=0, labelsize=9, pad=5)
+        ax.set_xticks(np.arange(-0.5, n_columns, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(rows), 1), minor=True)
+        ax.grid(which="minor", linewidth=1.2, color="white")
+        ax.tick_params(which="minor", bottom=False, left=False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # Character budget for treatment labels, scaled to how wide each well
+        # actually is on this plate format (a 384-well plate has much less
+        # room per well than a 96-well plate). Deliberately conservative
+        # (assumes ~1 fontsize-width per character, well above DejaVu Sans's
+        # actual average) so labels fit without needing the clip-path safety
+        # net below -- a first pass at 0.62x/char still let labels overflow
+        # wide enough that clipping cut into both edges instead of one.
+        treatment_fontsize = 5.5
+        cell_width_points = (figure_width / n_columns) * 72
+        max_treatment_chars = max(4, int(0.85 * cell_width_points / treatment_fontsize) - 1)
+
+        low_count_wells = []
+        for row_index, row_name in enumerate(rows):
+            for column_index, column_number in enumerate(columns):
+                value = grid.loc[row_name, column_number]
+                if pd.isna(value):
+                    ax.text(column_index, row_index, "—", ha="center", va="center", fontsize=9, color="#777777")
+                    continue
+
+                value = int(value)
+                well_id = f"{row_name}{column_number:02d}"
+                rgba = cmap(norm(value))
+                luminance = 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
+                text_color = "black" if luminance > 0.58 else "white"
+                is_low = value < min_cells
+                count_text = f"{value:,}" + (" !" if is_low else "")
+
+                treatment_label = None
+                if well_treatments:
+                    treatment_label = well_treatments.get(well_id)
+                    if treatment_label and len(treatment_label) > max_treatment_chars:
+                        treatment_label = treatment_label[: max_treatment_chars - 1] + "…"
+
+                if is_low:
+                    low_count_wells.append((well_id, value))
+                    ax.add_patch(
+                        patches.Rectangle(
+                            (column_index - 0.47, row_index - 0.47),
+                            0.94,
+                            0.94,
+                            fill=False,
+                            edgecolor="#C62828",
+                            linewidth=2.2,
+                            joinstyle="round",
+                        )
+                    )
+
+                # Count is always bold and a touch larger for readability;
+                # the optional treatment label below it is smaller/lighter
+                # so it doesn't compete visually with the primary number.
+                ax.text(
+                    column_index,
+                    row_index - (0.16 if treatment_label else 0),
+                    count_text,
+                    ha="center",
+                    va="center",
+                    fontsize=8.5,
+                    fontweight="bold",
+                    color=text_color,
+                )
+                if treatment_label:
+                    treatment_text = ax.text(
+                        column_index,
+                        row_index + 0.22,
+                        treatment_label,
+                        ha="center",
+                        va="center",
+                        fontsize=treatment_fontsize,
+                        fontweight="normal",
+                        color=text_color,
+                        alpha=0.9,
+                        clip_on=True,
+                    )
+                    # Belt-and-suspenders: even if the character budget above
+                    # underestimates this font's actual width, hard-clip to
+                    # this well's own cell so text can never bleed into a
+                    # neighboring well.
+                    treatment_text.set_clip_path(
+                        patches.Rectangle(
+                            (column_index - 0.49, row_index - 0.49),
+                            0.98,
+                            0.98,
+                            transform=ax.transData,
+                        )
+                    )
+
+        n_observed = int(np.isfinite(values).sum())
+        n_low = len(low_count_wells)
+        clean_plate_id = str(plate_id).strip()
+
+        fig.suptitle(f"Cell count per well — {clean_plate_id}", fontsize=14, fontweight="semibold", y=1.06)
+        ax.set_title(
+            f"{n_observed} observed wells · {n_low} below QC threshold (< {min_cells:,} cells)",
+            fontsize=9.5,
+            pad=30,
+        )
+
+        colorbar = fig.colorbar(image, ax=ax, fraction=0.038, pad=0.035, shrink=0.88)
+        colorbar.set_label("Cells per well", fontsize=10, labelpad=10)
+        colorbar.ax.tick_params(labelsize=8, length=3)
+        colorbar.outline.set_visible(False)
+        if observed_max > plot_vmax:
+            colorbar.ax.set_title(f"≥ {plot_vmax:,.0f}", fontsize=8, pad=6)
+
+        qc_patch = patches.Patch(
+            facecolor="none", edgecolor="#C62828", linewidth=2, label=f"Below threshold (< {min_cells:,})"
+        )
+        missing_patch = patches.Patch(facecolor="#E8E8E8", edgecolor="none", label="No observations")
+        ax.legend(
+            handles=[qc_patch, missing_patch],
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.10),
+            ncol=2,
+            frameon=False,
+            fontsize=8.5,
+            handlelength=1.5,
+        )
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_plate_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", clean_plate_id).strip("_")
+        png_path = out_dir / f"sc05_cell_count_plate_map_{safe_plate_id}.png"
+        pdf_path = out_dir / f"sc05_cell_count_plate_map_{safe_plate_id}.pdf"
+
+        fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
+        fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+        print(f"  ✓  {plate_id}: plate map saved ({n_observed} observed wells; {n_low} below threshold)")
+        print(f"     PNG: {png_path.name}")
+        print(f"     PDF: {pdf_path.name}")
+
+    return (plot_cell_count_heatmap,)
+
+
+@app.cell
+def _(
+    FIGS_DIR,
+    MIN_CELLS_PER_WELL,
+    PLATE_FORMAT,
+    blur_plate_maps_input,
+    plate_dfs,
+    plot_cell_count_heatmap,
+    well_treatments_by_plate,
+):
+    global_max = max(
+        df_plate.groupby("Metadata_Well", observed=True).size().max()
+        for df_plate in plate_dfs.values()
+    )
+
+    print("═" * 72)
+    print("SC-05 — CELL-COUNT PLATE MAPS")
+    print("═" * 72)
+    print(f"  Shared color-scale maximum: {global_max:,.0f} cells per well\n")
+
+    for _plate_id, _df_plate in plate_dfs.items():
+        plot_cell_count_heatmap(
+            df_plate=_df_plate,
+            plate_id=_plate_id,
+            out_dir=FIGS_DIR,
+            min_cells=MIN_CELLS_PER_WELL,
+            plate_format=PLATE_FORMAT,
+            vmax=global_max,
+            smooth_image=blur_plate_maps_input.value,
+            well_treatments=well_treatments_by_plate.get(_plate_id),
+        )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 6 — Cell-count summary and protected export
+
+    `counts_df` contains one row per plate/well combination.
+    """)
+    return
+
+
+@app.cell
+def _(MIN_CELLS_PER_WELL, df_all, pd):
+    def normalize_count_table(table: pd.DataFrame) -> pd.DataFrame:
+        """Return a standardized cell-count table for safe comparison."""
+        required_columns = ["Metadata_Plate", "Metadata_Well", "n_cells"]
+        missing_columns = [c for c in required_columns if c not in table.columns]
+        if missing_columns:
+            raise ValueError(f"Cell-count table is missing required columns: {missing_columns}")
+
+        normalized = table[required_columns].copy()
+        normalized["Metadata_Plate"] = normalized["Metadata_Plate"].astype("string").str.strip()
+        normalized["Metadata_Well"] = normalized["Metadata_Well"].astype("string").str.strip()
+        normalized["n_cells"] = pd.to_numeric(normalized["n_cells"], errors="raise").astype("int64")
+        return normalized.sort_values(["Metadata_Plate", "Metadata_Well"]).reset_index(drop=True)
+
+    counts_df = normalize_count_table(
+        df_all.groupby(["Metadata_Plate", "Metadata_Well"], observed=True)
+        .size()
+        .rename("n_cells")
+        .reset_index()
+    )
+    low_count_wells = counts_df.loc[counts_df["n_cells"] < MIN_CELLS_PER_WELL].copy()
+
+    print("═" * 72)
+    print("CELL COUNT PER WELL")
+    print("═" * 72)
+    print(f"  Plates:              {counts_df['Metadata_Plate'].nunique():,}")
+    print(f"  Wells:               {len(counts_df):,}")
+    print(f"  Total cells:         {counts_df['n_cells'].sum():,}")
+    print("\n  Cells per well:")
+    print(f"    Minimum:            {counts_df['n_cells'].min():,}")
+    print(f"    Median:             {counts_df['n_cells'].median():,.0f}")
+    print(f"    Mean:               {counts_df['n_cells'].mean():,.1f}")
+    print(f"    Maximum:            {counts_df['n_cells'].max():,}")
+    print(f"\n  QC threshold:        ≥ {MIN_CELLS_PER_WELL:,} cells")
+    print(f"  Wells passing QC:    {len(counts_df) - len(low_count_wells):,}")
+    print(f"  Wells below QC:      {len(low_count_wells):,}")
+    if not low_count_wells.empty:
+        print("\n  Wells below threshold:")
+        for row in low_count_wells.itertuples(index=False):
+            print(f"    - {row.Metadata_Plate} / {row.Metadata_Well}: {row.n_cells:,} cells")
+    return counts_df, low_count_wells
+
+
+@app.cell
+def _(CONFIG, COUNTS_CSV, counts_df, write_summary_table_protected):
+    counts_export_status = write_summary_table_protected(
+        counts_df, COUNTS_CSV, overwrite=CONFIG.overwrite_existing_outputs
+    )
+    print(f"✓ Count-summary file {counts_export_status}")
+    print(f"  File: {COUNTS_CSV}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 7 — Feature-integrity diagnostic
+
+    This is a **report-only** step. It counts missing and infinite
+    values but does not modify `df_all`. A detailed per-feature report
+    is saved for auditability and for use in NB02.
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    RESULTS_DIR,
+    df_all,
+    infer_feature_cols,
+    np,
+    pd,
+    write_summary_table_protected,
+):
+    feature_columns = infer_feature_cols(df_all)
+    if not feature_columns:
+        raise ValueError("No feature columns were detected in df_all.")
+
+    raw_feature_values = df_all[feature_columns]
+    finite_view = raw_feature_values.replace([np.inf, -np.inf], np.nan)
+
+    feature_integrity_df = pd.DataFrame(
+        {
+            "feature": feature_columns,
+            "n_missing_or_infinite": finite_view.isna().sum().to_numpy(dtype=int),
+            "fraction_missing_or_infinite": finite_view.isna().mean().to_numpy(dtype=float),
+            "n_positive_inf": np.isposinf(raw_feature_values.to_numpy()).sum(axis=0).astype(int),
+            "n_negative_inf": np.isneginf(raw_feature_values.to_numpy()).sum(axis=0).astype(int),
+        }
+    )
+    feature_integrity_df["status"] = np.select(
+        [
+            feature_integrity_df["fraction_missing_or_infinite"].eq(0),
+            feature_integrity_df["fraction_missing_or_infinite"].eq(1),
+        ],
+        ["complete", "fully_missing"],
+        default="partially_missing",
+    )
+    feature_integrity_df = feature_integrity_df.sort_values(
+        ["fraction_missing_or_infinite", "feature"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+    fully_missing_features = feature_integrity_df.loc[
+        feature_integrity_df["status"].eq("fully_missing"), "feature"
+    ].tolist()
+    partially_missing_features = feature_integrity_df.loc[
+        feature_integrity_df["status"].eq("partially_missing"), "feature"
+    ].tolist()
+    n_positive_inf = int(feature_integrity_df["n_positive_inf"].sum())
+    n_negative_inf = int(feature_integrity_df["n_negative_inf"].sum())
+    n_infinite = n_positive_inf + n_negative_inf
+    n_complete_features = int(feature_integrity_df["status"].eq("complete").sum())
+
+    print("═" * 72)
+    print("FEATURE-INTEGRITY DIAGNOSTIC")
+    print("═" * 72)
+    print(f"  Cells evaluated:                  {len(df_all):,}")
+    print(f"  Feature columns:                  {len(feature_columns):,}")
+    print("\n  Feature completeness:")
+    print(f"    Complete features:              {n_complete_features:,}")
+    print(f"    Partially missing features:     {len(partially_missing_features):,}")
+    print(f"    Fully missing features:         {len(fully_missing_features):,}")
+    print("\n  Infinite values:")
+    print(f"    Positive infinity:              {n_positive_inf:,}")
+    print(f"    Negative infinity:              {n_negative_inf:,}")
+
+    if fully_missing_features or partially_missing_features or n_infinite:
+        print("\n⚠ Missing or non-finite values were detected.")
+        print("  No filtering or imputation was applied in NB01.")
+    else:
+        print("\n✓ No missing or infinite feature values were detected.")
+
+    FEATURE_INTEGRITY_CSV = RESULTS_DIR / "feature_integrity_nb01.csv"
+    feature_integrity_status = write_summary_table_protected(
+        feature_integrity_df, FEATURE_INTEGRITY_CSV, overwrite=CONFIG.overwrite_existing_outputs
+    )
+    print(f"\n✓ Feature-integrity report {feature_integrity_status}")
+    print(f"  File: {FEATURE_INTEGRITY_CSV}")
+    return (
+        FEATURE_INTEGRITY_CSV,
+        feature_columns,
+        fully_missing_features,
+        n_infinite,
+        partially_missing_features,
+    )
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 8 — Protected export of single-cell profiles
+
+    Parquet is the primary pipeline format because it preserves data
+    types and is efficient for wide tables. CSV is retained for
+    interoperability.
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    OUTPUT_CSV,
+    OUTPUT_PARQUET,
+    df_all,
+    write_csv_protected,
+    write_parquet_protected,
+):
+    print("═" * 72)
+    print("SINGLE-CELL PROFILE EXPORT")
+    print("═" * 72)
+    print(f"  Current dataset:     {len(df_all):,} cells × {df_all.shape[1]:,} columns\n")
+
+    parquet_export_status = write_parquet_protected(
+        df_all, OUTPUT_PARQUET, overwrite=CONFIG.overwrite_existing_outputs
+    )
+    print(f"✓ Parquet profile {parquet_export_status}")
+    print(f"  File: {OUTPUT_PARQUET}")
+
+    csv_export_status = write_csv_protected(
+        df_all, OUTPUT_CSV, overwrite=CONFIG.overwrite_existing_outputs
+    )
+    print(f"\n✓ CSV interoperability copy {csv_export_status}")
+    print(f"  File: {OUTPUT_CSV}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 9 — Provenance
+
+    The provenance record documents the local code state and execution
+    context. It only runs read-only Git commands; it does **not**
+    create commits or push anything to a remote repository.
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    COUNTS_CSV,
+    EXPERIMENT_ID,
+    FEATURE_INTEGRITY_CSV,
+    FIGS_DIR,
+    MIN_CELLS_PER_WELL,
+    OUTPUT_CSV,
+    OUTPUT_PARQUET,
+    PLATE_FORMAT,
+    REPO_ROOT,
+    RESULTS_DIR,
+    Sequence,
+    datetime,
+    df_all,
+    feature_columns,
+    fully_missing_features,
+    json,
+    low_count_wells,
+    n_infinite,
+    np,
+    partially_missing_features,
+    pd,
+    platform,
+    subprocess,
+    timezone,
+):
+    NOTEBOOK_NAME = "01_samples_retrieval.py"
+
+    def run_git_command(arguments: Sequence[str], repo_root) -> str | None:
+        """Run a read-only Git command and return stripped stdout."""
+        try:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    git_commit_full = run_git_command(["rev-parse", "HEAD"], REPO_ROOT)
+    git_branch = run_git_command(["branch", "--show-current"], REPO_ROOT) or "unknown"
+    git_status = run_git_command(["status", "--porcelain"], REPO_ROOT)
+
+    provenance = {
+        "schema_version": 1,
+        "pipeline": {
+            "notebook": NOTEBOOK_NAME,
+            "experiment_id": EXPERIMENT_ID,
+            "executed_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        "configuration": {
+            "plate_format": int(PLATE_FORMAT),
+            "minimum_cells_per_well": int(MIN_CELLS_PER_WELL),
+            "overwrite_existing_outputs": bool(CONFIG.overwrite_existing_outputs),
+        },
+        "dataset": {
+            "n_cells": int(df_all.shape[0]),
+            "n_columns": int(df_all.shape[1]),
+            "n_features": int(len(feature_columns)),
+            "n_plates": int(df_all["Metadata_Plate"].nunique()),
+            "n_wells": int(
+                df_all[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
+            ),
+            "n_low_count_wells": int(len(low_count_wells)),
+            "n_fully_missing_features": int(len(fully_missing_features)),
+            "n_partially_missing_features": int(len(partially_missing_features)),
+            "n_infinite_values": int(n_infinite),
+        },
+        "version_control": {
+            "git_commit": git_commit_full or "unknown",
+            "git_commit_short": git_commit_full[:8] if git_commit_full else "unknown",
+            "git_branch": git_branch,
+            "working_tree_dirty": bool(git_status) if git_status is not None else None,
+        },
+        "environment": {
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "pandas_version": pd.__version__,
+            "numpy_version": np.__version__,
+        },
+        "outputs": {
+            "single_cell_parquet": str(OUTPUT_PARQUET),
+            "single_cell_csv": str(OUTPUT_CSV),
+            "cell_count_csv": str(COUNTS_CSV),
+            "feature_integrity_csv": str(FEATURE_INTEGRITY_CSV),
+            "figure_directory": str(FIGS_DIR),
+        },
+    }
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    provenance_latest_path = RESULTS_DIR / "provenance_nb01_latest.json"
+    with provenance_latest_path.open("w", encoding="utf-8") as _f:
+        json.dump(provenance, _f, indent=2, ensure_ascii=False)
+
+    provenance_history_path = None
+    if CONFIG.save_provenance_history:
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        provenance_history_path = RESULTS_DIR / f"provenance_nb01_{_timestamp}.json"
+        if provenance_history_path.exists():
+            raise FileExistsError(f"Historical provenance file already exists: {provenance_history_path}")
+        with provenance_history_path.open("w", encoding="utf-8") as _f:
+            json.dump(provenance, _f, indent=2, ensure_ascii=False)
+
+    print("═" * 72)
+    print("NB01 PROVENANCE")
+    print("═" * 72)
+    print(f"  Notebook:            {provenance['pipeline']['notebook']}")
+    print(f"  Experiment:          {provenance['pipeline']['experiment_id']}")
+    print(f"  Executed at UTC:     {provenance['pipeline']['executed_at_utc']}")
+    print(f"\n  Git commit:          {provenance['version_control']['git_commit_short']}")
+    print(f"  Git branch:          {provenance['version_control']['git_branch']}")
+    dirty_state = provenance["version_control"]["working_tree_dirty"]
+    if dirty_state is True:
+        print("  Working tree:        modified — uncommitted changes present")
+    elif dirty_state is False:
+        print("  Working tree:        clean")
+    else:
+        print("  Working tree:        unknown")
+    print(f"\n✓ Latest provenance:   {provenance_latest_path}")
+    if provenance_history_path is not None:
+        print(f"✓ Historical record:  {provenance_history_path}")
+    else:
+        print("  Historical record:  disabled")
+    return (provenance_latest_path,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 10 — Final integrity checks and execution summary
+
+    These checks verify agreement among the principal in-memory
+    objects and exported summaries. They do not transform the data.
+    """)
+    return
+
+
+@app.cell
+def _(
+    COUNTS_CSV,
+    EXPERIMENT_ID,
+    FEATURE_INTEGRITY_CSV,
+    FIGS_DIR,
+    OUTPUT_CSV,
+    OUTPUT_PARQUET,
+    Path,
+    counts_df,
+    df_all,
+    feature_columns,
+    fully_missing_features,
+    n_infinite,
+    partially_missing_features,
+    plate_dfs,
+    provenance_latest_path,
+):
+    integrity_errors = []
+
+    if int(counts_df["n_cells"].sum()) != len(df_all):
+        integrity_errors.append("The sum of counts_df['n_cells'] does not equal len(df_all).")
+
+    df_plate_ids = set(df_all["Metadata_Plate"].astype(str))
+    count_plate_ids = set(counts_df["Metadata_Plate"].astype(str))
+    if df_plate_ids != count_plate_ids:
+        integrity_errors.append("Plate identifiers differ between df_all and counts_df.")
+
+    expected_wells = df_all[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
+    if len(counts_df) != expected_wells:
+        integrity_errors.append(
+            "The number of rows in counts_df does not equal the number of "
+            "unique plate/well combinations in df_all."
+        )
+
+    required_outputs = [OUTPUT_PARQUET, OUTPUT_CSV, COUNTS_CSV, FEATURE_INTEGRITY_CSV, provenance_latest_path]
+    missing_outputs = [p for p in required_outputs if not Path(p).exists()]
+    if missing_outputs:
+        integrity_errors.append(
+            "Required output files are missing: " + ", ".join(str(p) for p in missing_outputs)
+        )
+
+    if integrity_errors:
+        raise RuntimeError(
+            "\nNB01 integrity checks failed\n"
+            "============================\n\n"
+            + "\n".join(f"  - {e}" for e in integrity_errors)
+        )
+
+    print("═" * 72)
+    print("NB01 COMPLETED")
+    print("═" * 72)
+    print("✓ All final integrity checks passed\n")
+    print(f"  Experiment:          {EXPERIMENT_ID}")
+    print(f"  Plates loaded:       {len(plate_dfs):,}")
+    print(f"  Observed wells:      {len(counts_df):,}")
+    print(f"  Single cells:        {len(df_all):,}")
+    print(f"  Feature columns:     {len(feature_columns):,}")
+    print(f"  Fully missing:       {len(fully_missing_features):,}")
+    print(f"  Partially missing:   {len(partially_missing_features):,}")
+    print(f"  Infinite values:     {n_infinite:,}")
+    print("\n  Primary output:")
+    print(f"    {OUTPUT_PARQUET}")
+    print("\n  QC outputs:")
+    print(f"    {COUNTS_CSV}")
+    print(f"    {FEATURE_INTEGRITY_CSV}")
+    print(f"    {FIGS_DIR}")
+    print("\n  Provenance:")
+    print(f"    {provenance_latest_path}")
+    print("\nNext step: NB02 — Annotate · Clean · Aggregate · Normalize · Feature Select")
+    return
+
+
+if __name__ == "__main__":
+    app.run()
