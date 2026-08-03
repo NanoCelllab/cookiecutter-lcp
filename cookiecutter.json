@@ -12,8 +12,5 @@
   "drug": "",
   "genetic": "",
 
-  "repo_name": "{{ cookiecutter.modality | lower | replace(' ', '-') }}-{{ cookiecutter.project_tag | lower | replace(' ', '-') }}{{ '-' + (cookiecutter.tissue | lower | replace(' ', '-')) if cookiecutter.tissue else '' }}{{ '-multi-cell' if (cookiecutter.cell_models and (',' in cookiecutter.cell_models)) else ('-' + (cookiecutter.cell_models.split(',')[0] | trim | lower | replace(' ', '-')) ) if cookiecutter.cell_models else '' }}{{ '-' + (cookiecutter.nanoparticle | lower | replace(' ', '-')) if cookiecutter.nanoparticle else '' }}{{ '-' + (cookiecutter.drug | lower | replace(' ', '-')) if cookiecutter.drug else '' }}{{ '-' + (cookiecutter.genetic | lower | replace(' ', '-')) if cookiecutter.genetic else '' }}",
-
-  "use_pixi": ["yes", "no"],
-  "pixi_env_type": ["hca-analysis", "minimal"]
+  "repo_name": "{{ cookiecutter.modality | lower | replace(' ', '-') }}-{{ cookiecutter.project_tag | lower | replace(' ', '-') }}{{ '-' + (cookiecutter.tissue | lower | replace(' ', '-')) if cookiecutter.tissue else '' }}{{ '-multi-cell' if (cookiecutter.cell_models and (',' in cookiecutter.cell_models)) else ('-' + (cookiecutter.cell_models.split(',')[0] | trim | lower | replace(' ', '-')) ) if cookiecutter.cell_models else '' }}{{ '-' + (cookiecutter.nanoparticle | lower | replace(' ', '-')) if cookiecutter.nanoparticle else '' }}{{ '-' + (cookiecutter.drug | lower | replace(' ', '-')) if cookiecutter.drug else '' }}{{ '-' + (cookiecutter.genetic | lower | replace(' ', '-')) if cookiecutter.genetic else '' }}"
 }

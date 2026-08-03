@@ -78,7 +78,7 @@ This template uses **Pixi** to manage a reproducible computational environment f
 
 The standard NanoCell environment, `hca-analysis`, is designed for:
 
-- notebooks (JupyterLab)
+- notebooks (marimo — the analysis notebooks under `workspace/analysis/`; JupyterLab is also available for any legacy `.ipynb`)
 - tabular profile analysis
 - quality control (QC)
 - pycytominer workflows
@@ -102,7 +102,19 @@ Install environment:
 pixi install
 ```
 
-Start JupyterLab:
+Edit a notebook (marimo, reactive editor in the browser):
+
+```bash
+pixi run marimo edit workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
+```
+
+Run a notebook headlessly (deterministic, e.g. for CI or a full pipeline run):
+
+```bash
+pixi run python3 workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
+```
+
+Start JupyterLab (only needed for legacy `.ipynb` files, if any remain):
 
 ```bash
 pixi run lab

@@ -73,7 +73,7 @@ Este template utiliza **Pixi** para gerenciar um ambiente computacional reprodut
 
 O ambiente padrão do laboratório, chamado `hca-analysis`, foi definido para cobrir:
 
-- notebooks (JupyterLab)
+- notebooks (marimo — os notebooks de análise em `workspace/analysis/`; o JupyterLab também está disponível para eventuais `.ipynb` legados)
 - análise de dados tabulares (profiles)
 - controle de qualidade (QC)
 - workflows com pycytominer
@@ -97,7 +97,19 @@ Instalar o ambiente:
 pixi install
 ```
 
-Abrir o JupyterLab:
+Editar um notebook (marimo, editor reativo no navegador):
+
+```bash
+pixi run marimo edit workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
+```
+
+Executar um notebook sem interface, de forma determinística (ex.: CI ou rodar o pipeline completo):
+
+```bash
+pixi run python3 workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
+```
+
+Abrir o JupyterLab (necessário apenas para eventuais `.ipynb` legados):
 
 ```bash
 pixi run lab
