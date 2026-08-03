@@ -35,18 +35,35 @@ Cada experimento deve ser armazenado em uma pasta nomeada como:
 │     ├─ images/         # imagens brutas de microscopia
 │     └─ illum/          # correção de iluminação (opcional)
 ├─ workspace/
-│  ├─ metadata/<experiment>/
+│  ├─ metadata/
+│  │  ├─ templates/               # modelo genérico de barcode_platemap/platemap
+│  │  └─ <experiment>/            # copiado de templates/, preenchido
 │  ├─ load_data_csv/<experiment>/
-│  ├─ pipelines/<experiment>/
+│  ├─ pipelines/
+│  │  ├─ templates/               # modelo genérico de .cppipe (assaydev/analysis)
+│  │  └─ <experiment>/            # .cppipe adaptado deste experimento
+│  ├─ hca_pipeline/                # pacote Python compartilhado, agnóstico ao ensaio (não é por experimento)
 │  ├─ assaydev/<experiment>/outlines_qc/
-│  ├─ analysis/<experiment>/analysis/
+│  ├─ segmentation/
+│  │  └─ cellpose/
+│  │     ├─ model/                # modelos de segmentação já treinados, prontos para uso
+│  │     ├─ training/             # dados de treinamento / referência
+│  │     └─ objects/<experiment>/ # saídas de segmentação deste experimento
+│  ├─ analysis/
+│  │  ├─ templates/               # modelo genérico de notebooks
+│  │  └─ <experiment>/analysis/   # cópia dos notebooks deste experimento + resultados/figuras
 │  ├─ profiles/<experiment>/
 │  ├─ backend/<experiment>/
-│  ├─ models/
-│  └─ cellpose/
+│  └─ models/<experiment>/        # modelos de ML treinados (PCA/UMAP/LDA/etc.)
 └─ workspace_dl/
    └─ <experiment>/notebooks/
 ```
+
+> As subpastas `templates/` são material permanente da biblioteca, não
+> exemplos avulsos — copie a partir delas para uma nova pasta `<experiment>/`
+> a cada novo experimento, e depois adapte. `hca_pipeline/` e
+> `segmentation/cellpose/model|training/` guardam o que é usado como está
+> (código compartilhado, modelos já treinados) e nunca são por experimento.
 
 ---
 
@@ -136,18 +153,29 @@ mkdir -p images/$EXP/images
 mkdir -p images/$EXP/illum
 
 mkdir -p workspace/metadata/$EXP/platemap
+cp workspace/metadata/templates/* workspace/metadata/$EXP/
+
 mkdir -p workspace/load_data_csv/$EXP
 
 mkdir -p workspace/pipelines/$EXP
+cp workspace/pipelines/templates/* workspace/pipelines/$EXP/
 
 mkdir -p workspace/assaydev/$EXP/outlines_qc
+mkdir -p workspace/segmentation/cellpose/objects/$EXP
+
 mkdir -p workspace/analysis/$EXP/analysis
+cp workspace/analysis/templates/* workspace/analysis/$EXP/analysis/
 
 mkdir -p workspace/backend/$EXP
 mkdir -p workspace/profiles/$EXP
+mkdir -p workspace/models/$EXP
 
 mkdir -p workspace_dl/$EXP/notebooks
 ```
+
+`workspace/hca_pipeline/` e `workspace/segmentation/cellpose/{model,training}/`
+não são criados por experimento — já existem uma vez na raiz do repositório
+e são compartilhados/importados, não copiados.
 
 ---
 

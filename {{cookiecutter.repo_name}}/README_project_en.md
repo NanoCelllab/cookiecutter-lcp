@@ -47,18 +47,25 @@ This project investigates the effects of polystyrene nanoparticles (NPPS) on hum
 
 ```
 <repo_root>/
-├── images/              # raw and illumination-corrected images
-├── workspace/           # metadata, pipelines, analyses, and profiles
-│   ├── metadata/
-│   ├── pipelines/
-│   ├── analysis/
-│   ├── backend/
-│   ├── profiles/
-│   └── notebooks/
-└── workspace_dl/        # deep learning notebooks (optional)
+├── images/                    # raw and illumination-corrected images
+├── workspace/
+│   ├── metadata/              # templates/ + one folder per experiment
+│   ├── load_data_csv/         # one folder per experiment
+│   ├── pipelines/             # templates/ (.cppipe) + one folder per experiment
+│   ├── hca_pipeline/          # shared Python package (not per-experiment)
+│   ├── assaydev/              # one folder per experiment
+│   ├── segmentation/cellpose/ # model/, training/ (shared) + objects/ per experiment
+│   ├── analysis/              # templates/ (notebooks) + one folder per experiment
+│   ├── profiles/              # one folder per experiment
+│   ├── backend/               # one folder per experiment
+│   └── models/                # trained ML models, one folder per experiment
+└── workspace_dl/              # deep learning notebooks (optional)
 ```
 
-Each subfolder contains experiments named as `YYYY_MM_DD_Cell_Treatment_Time`.
+Every `workspace/<subfolder>/` (except the shared `hca_pipeline/` and
+`segmentation/cellpose/{model,training}/`) has one sub-folder per experiment,
+named `YYYY_MM_DD_Cell_Treatment_Time`. Where a `templates/` sibling exists,
+copy from it into your new experiment folder and adapt.
 
 ---
 

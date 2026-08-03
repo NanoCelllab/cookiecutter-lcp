@@ -47,18 +47,26 @@ O projeto investiga os efeitos de nanopartículas de poliestireno (NPPS) em cél
 
 ```
 <repo_root>/
-├── images/              # imagens brutas e correções de iluminação, serão depositadas no REDU no futuro
-├── workspace/           # metadados, pipelines, análises e perfis
-│   ├── metadata/
-│   ├── pipelines/
-│   ├── analysis/
-│   ├── backend/
-│   ├── profiles/
-│   └── notebooks/
-└── workspace_dl/        # notebooks de deep learning (opcional)
+├── images/                    # imagens brutas e correções de iluminação, serão depositadas no REDU no futuro
+├── workspace/
+│   ├── metadata/              # templates/ + uma pasta por experimento
+│   ├── load_data_csv/         # uma pasta por experimento
+│   ├── pipelines/             # templates/ (.cppipe) + uma pasta por experimento
+│   ├── hca_pipeline/          # pacote Python compartilhado (não é por experimento)
+│   ├── assaydev/              # uma pasta por experimento
+│   ├── segmentation/cellpose/ # model/, training/ (compartilhados) + objects/ por experimento
+│   ├── analysis/              # templates/ (notebooks) + uma pasta por experimento
+│   ├── profiles/              # uma pasta por experimento
+│   ├── backend/               # uma pasta por experimento
+│   └── models/                # modelos de ML treinados, uma pasta por experimento
+└── workspace_dl/              # notebooks de deep learning (opcional)
 ```
 
-Cada subpasta contém experimentos nomeados como `YYYY_MM_DD_Celula_Perturbacao_Tempo`.
+Cada `workspace/<subpasta>/` (exceto `hca_pipeline/` e
+`segmentation/cellpose/{model,training}/`, que são compartilhados) tem uma
+subpasta por experimento, nomeada `YYYY_MM_DD_Celula_Perturbacao_Tempo`. Onde
+existir uma pasta `templates/` ao lado, copie dela para a pasta do novo
+experimento e adapte.
 
 ---
 
