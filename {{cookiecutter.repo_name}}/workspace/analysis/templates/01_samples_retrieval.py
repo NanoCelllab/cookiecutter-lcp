@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.15"
+__generated_with = "0.23.16"
 app = marimo.App(width="medium")
 
 
@@ -223,6 +223,11 @@ def _(SUPPORTED_PLATE_FORMATS, loaded_config, mo):
         value=loaded_config.channels or ["GFP", "PI"],
         label="Imaging channels used (saved for later pipeline steps)",
     )
+    image_root_input = mo.ui.text(
+        value=loaded_config.image_root or "",
+        label="Raw image directory, relative to repo root (leave blank if none — "
+        "00_image_quality.py self-skips without this)",
+    )
     overwrite_input = mo.ui.checkbox(
         value=loaded_config.overwrite_existing_outputs,
         label="Overwrite existing outputs",
@@ -236,12 +241,14 @@ def _(SUPPORTED_PLATE_FORMATS, loaded_config, mo):
             plate_format_input,
             min_cells_input,
             channels_input,
+            image_root_input,
             overwrite_input,
             save_history_input,
         ]
     )
     return (
         channels_input,
+        image_root_input,
         min_cells_input,
         overwrite_input,
         plate_format_input,
@@ -254,6 +261,7 @@ def _(
     REPO_ROOT,
     channels_input,
     experiment_id_input,
+    image_root_input,
     loaded_config,
     min_cells_input,
     overwrite_input,
@@ -280,6 +288,7 @@ def _(
         plate_format=PLATE_FORMAT,
         min_cells_per_well=MIN_CELLS_PER_WELL,
         channels=list(channels_input.value),
+        image_root=image_root_input.value.strip() or None,
         overwrite_existing_outputs=bool(overwrite_input.value),
         save_provenance_history=bool(save_history_input.value),
     )
@@ -292,6 +301,7 @@ def _(
     print(f"  Plate format:        {PLATE_FORMAT}-well")
     print(f"  Minimum cells/well:  {MIN_CELLS_PER_WELL}")
     print(f"  Channels:            {', '.join(CONFIG.channels) or '(none selected)'}")
+    print(f"  Image root:          {CONFIG.image_root or '(none — image QC disabled)'}")
     print(f"  Repository root:     {REPO_ROOT}")
     print(f"  Saved config:        {_config_path}")
     return CONFIG, EXPERIMENT_ID, MIN_CELLS_PER_WELL, PLATE_FORMAT
@@ -457,13 +467,82 @@ def _(mo):
     The CSV is read exactly once. `df_all` preserves the complete
     single-cell table; `plate_dfs` provides one validated DataFrame per
     plate for plate-level QC.
+
+    If `00_image_quality.py` has been run for this experiment, its
+    `results/image_quality/excluded_sites.csv` (Plate/Well/Site combinations
+    that failed a blur/saturation/SNR threshold) is applied here, before any
+    structural validation below — so debris/out-of-focus/mis-exposed fields
+    never reach NB02's aggregation. If that file doesn't exist (image QC
+    hasn't been run, or `image_root` isn't configured for this experiment),
+    this step is a no-op.
     """)
     return
 
 
 @app.cell
-def _(LEGACY_SINGLE_CELL_CSV, read_legacy_single_cell_csv):
+def _(LEGACY_SINGLE_CELL_CSV, RESULTS_DIR, pd, read_legacy_single_cell_csv):
     df_all = read_legacy_single_cell_csv(LEGACY_SINGLE_CELL_CSV)
+
+    _excluded_sites_csv = RESULTS_DIR / "image_quality" / "excluded_sites.csv"
+    if not _excluded_sites_csv.exists():
+        print("ℹ️  No image-quality exclusion list found — skipping (image QC not run for this experiment).")
+    else:
+        _excluded = pd.read_csv(_excluded_sites_csv)
+        _excluded["Metadata_Plate"] = _excluded["Metadata_Plate"].astype("string").str.strip()
+        _excluded["Metadata_Well"] = _excluded["Metadata_Well"].astype("string").str.strip()
+
+        if "Metadata_Site" in df_all.columns and "Metadata_Site" in _excluded.columns:
+            # Match on a trailing-underscore-insensitive plate key: raw image
+            # folder names (what NB00's image_qc.infer_plate reads) and this
+            # experiment's single-cell/platemap convention have been observed
+            # to disagree on a trailing "_" (e.g. "..._Plate_1" vs.
+            # "..._Plate_1_") even though they refer to the same plate. The
+            # canonical Metadata_Plate values in df_all are left untouched --
+            # this normalization is only used to build the join key.
+            _join_cols = ["_join_plate", "Metadata_Well", "Metadata_Site"]
+            _excluded["Metadata_Site"] = _excluded["Metadata_Site"].astype("string")
+            _excluded["_join_plate"] = _excluded["Metadata_Plate"].str.rstrip("_")
+            _excluded_keys = _excluded[_join_cols].drop_duplicates()
+
+            _df_all_keys = df_all[["Metadata_Plate", "Metadata_Well", "Metadata_Site"]].copy()
+            _df_all_keys["Metadata_Site"] = _df_all_keys["Metadata_Site"].astype("string")
+            _df_all_keys["_join_plate"] = _df_all_keys["Metadata_Plate"].str.rstrip("_")
+
+            _n_matched_keys = len(
+                _excluded_keys.merge(_df_all_keys[_join_cols].drop_duplicates(), on=_join_cols, how="inner")
+            )
+            print(
+                f"  Match check: {_n_matched_keys}/{len(_excluded_keys)} excluded plate/well/site "
+                "combinations found a matching entry in df_all. A low match count can mean "
+                "plate/well/site identifiers differ between the raw-image folder names and this "
+                "experiment's single-cell metadata, OR that a flagged site already contributes zero "
+                "cells to df_all (e.g. CellProfiler segmented nothing on a badly under/overexposed "
+                "field) — inspect the unmatched rows in excluded_sites.csv if this matters for your "
+                "dataset, don't assume it's a bug."
+            )
+
+            _n_before = len(df_all)
+            _merged = _df_all_keys.merge(_excluded_keys, on=_join_cols, how="left", indicator=True)
+            df_all = df_all.loc[_merged["_merge"].to_numpy() == "left_only"].reset_index(drop=True)
+            _n_dropped = _n_before - len(df_all)
+            print(
+                f"✓ Applied image-QC exclusions (site-level): dropped {_n_dropped:,} of {_n_before:,} "
+                f"cells ({_n_matched_keys:,} of {len(_excluded_keys):,} flagged plate/well/site "
+                "combination(s) actually matched and were excluded)"
+            )
+        else:
+            # No per-site granularity in this experiment's single-cell table.
+            # Dropping a whole well because one of several imaged sites
+            # failed QC could discard good cells too, so this case is
+            # surfaced for manual review instead of auto-excluded.
+            print(
+                "⚠️  df_all has no Metadata_Site column, so the site-level image-QC exclusion "
+                "list can't be safely applied automatically. Review the flagged plate/well "
+                "combinations below and exclude them manually if warranted:"
+            )
+            _flagged_wells = _excluded[["Metadata_Plate", "Metadata_Well"]].drop_duplicates()
+            for _row in _flagged_wells.itertuples(index=False):
+                print(f"    - {_row.Metadata_Plate} / {_row.Metadata_Well}")
     return (df_all,)
 
 
@@ -980,7 +1059,6 @@ def _(mo):
     """)
     return
 
-
 @app.cell
 def _(MIN_CELLS_PER_WELL, df_all, pd):
     def normalize_count_table(table: pd.DataFrame) -> pd.DataFrame:
@@ -1041,8 +1119,12 @@ def _(mo):
     ## 7 — Feature-integrity diagnostic
 
     This is a **report-only** step. It counts missing and infinite
-    values but does not modify `df_all`. A detailed per-feature report
-    is saved for auditability and for use in NB02.
+    values but does not modify `df_all`, and NB02 does not read this file
+    back in — NB02 computes its own missingness/imputation decisions
+    independently. The report saved here exists purely for human
+    auditability: a per-feature breakdown of what's missing or infinite
+    *before* any cleaning happens, in case that's relevant to interpreting
+    NB02's later choices.
     """)
     return
 

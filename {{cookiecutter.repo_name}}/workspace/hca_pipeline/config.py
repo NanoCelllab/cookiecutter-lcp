@@ -1,4 +1,4 @@
-"""Experiment configuration for the LCP analysis pipeline.
+"""Experiment configuration for the HCA analysis pipeline.
 
 Centralizes the knobs every pipeline notebook needs to be dataset-agnostic:
 which metadata columns exist, what control-type vocabulary this experiment
@@ -230,15 +230,19 @@ class ExperimentConfig:
 
     ``concentration_col``/``time_col`` are ``None`` when the corresponding
     axis doesn't apply to this experiment -- notebooks branch on that instead
-    of assuming every dataset has a dose or time dimension. Control-type
-    vocabulary is a *list* per role (not a single literal) since different
-    platemap conventions use different labels for the same role.
+    of assuming every dataset has a dose or time dimension. ``image_root`` is
+    ``None`` unless raw microscopy images are available for this experiment,
+    following the same pattern -- ``00_image_quality.py`` self-skips when it
+    is unset. Control-type vocabulary is a *list* per role (not a single
+    literal) since different platemap conventions use different labels for
+    the same role.
     """
 
     experiment_id: str
     plate_format: int = 96
     min_cells_per_well: int = 100
     channels: list[str] = field(default_factory=list)
+    image_root: Optional[str] = None
 
     plate_col: str = "Metadata_Plate"
     well_col: str = "Metadata_Well"

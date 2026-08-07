@@ -14,9 +14,10 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 04 — Phenotypic Fingerprints for Live Cell Painting
+    # 05 — Phenotypic Fingerprints for Live Cell Painting
 
-    **Pipeline step:** 4 of 6
+    **Pipeline step:** 5 of 6
+    **Position in pipeline:** NB04 (phenotypic profiling) → **NB05 (phenotypic fingerprints)** → NB06 (single-cell analysis)
     **Purpose:** turn per-well normalized CellProfiler features into
     biologically interpretable phenotypic fingerprints — per-feature effect
     sizes, a feature taxonomy, and fingerprint matrices/plots at multiple
@@ -51,7 +52,7 @@ def _(mo):
        Concentration; dose-overlay radar plots). If that column is absent it
        crashed. This version checks `CONFIG.resolve_columns(df).has_dose_axis`
        (the same pattern already used by `hca_pipeline.metrics_qc.run_dose_response`
-       for NB05) and, when there is no dose axis, builds conditions from
+       for NB03) and, when there is no dose axis, builds conditions from
        treatment alone and skips only the dose-overlay radar section with a
        clear printed message — everything else still runs.
     2. **`SPECIAL_TREATMENTS` is a widget, not a hardcoded literal.** The
@@ -443,7 +444,7 @@ def _(INPUT_PARQUET, pd):
 def _(CONFIG, df_loaded):
     # This is the fix for the legacy notebook's unconditional dose-axis
     # assumption: CONFIG.resolve_columns(df) is the same pattern already used
-    # by hca_pipeline.metrics_qc.run_dose_response for NB05. has_dose_axis is
+    # by hca_pipeline.metrics_qc.run_dose_response for NB03. has_dose_axis is
     # False (rather than raising) whenever no concentration/dose column can be
     # resolved against the actual data.
     CONFIG_RESOLVED = CONFIG.resolve_columns(df_loaded)
@@ -894,26 +895,47 @@ def _(
     fingerprint_matrices,
     plot_fingerprint_heatmap,
 ):
-    _n_heatmaps = 0
+    # Every heatmap is still rendered and saved to disk here. They're kept in
+    # a dict rather than displayed all at once (mo.vstack of all ~24 figures
+    # serializes to marimo's browser output and can exceed its output-size
+    # limit -- 22.7MB observed against an 8MB default). Only the one picked
+    # in the browser below actually gets rendered to the frontend.
+    heatmap_figs_by_label = {}
     for _grouping_level, _metric_matrices in fingerprint_matrices.items():
         _grouping_figures_dir = FIGURES_DIR / _grouping_level
         for _metric_name, _matrix in _metric_matrices.items():
             _metric_spec = FINGERPRINT_METRICS[_metric_name]
-            plot_fingerprint_heatmap(
+            _label = f"{_grouping_level.replace('_', ' ').title()} — {_metric_name.replace('_', ' ').title()}"
+            _fig = plot_fingerprint_heatmap(
                 _matrix,
-                title=(
-                    f"{_grouping_level.replace('_', ' ').title()} — "
-                    f"{_metric_name.replace('_', ' ').title()}"
-                ),
+                title=_label,
                 colorbar_label=_metric_spec["label"],
                 output_path=_grouping_figures_dir / f"{_metric_name}_heatmap.png",
                 diverging=(_metric_name == "mean_signed"),
                 fixed_range=(0, 1) if _metric_name == "fraction_altered" else None,
                 dpi=FIGURE_DPI,
             )
-            _n_heatmaps += 1
+            if _fig is not None:
+                heatmap_figs_by_label[_label] = _fig
 
-    print(f"✓ Saved {_n_heatmaps} fingerprint heatmap(s) to {FIGURES_DIR}")
+    print(f"✓ Saved {len(heatmap_figs_by_label)} fingerprint heatmap(s) to {FIGURES_DIR}")
+    return (heatmap_figs_by_label,)
+
+
+@app.cell
+def _(heatmap_figs_by_label, mo):
+    heatmap_picker = mo.ui.dropdown(
+        options=list(heatmap_figs_by_label),
+        value=next(iter(heatmap_figs_by_label), None),
+        label=f"Heatmap to view ({len(heatmap_figs_by_label)} available — all saved to disk regardless)",
+    )
+    heatmap_picker
+    return (heatmap_picker,)
+
+
+@app.cell
+def _(heatmap_figs_by_label, heatmap_picker):
+    heatmap_figs_by_label.get(heatmap_picker.value)
     return
 
 
@@ -957,6 +979,10 @@ def _(
             "radar plots are still generated below."
         )
 
+    # Same reasoning as the heatmap picker above: every radar figure is still
+    # rendered and saved to disk, but kept in a dict rather than mo.vstack'd
+    # all at once, to stay under marimo's output-size limit.
+    radar_figs_by_label = {}
     for _grouping_level in RADAR_GROUPINGS:
         if _grouping_level not in fingerprint_matrices:
             continue
@@ -964,50 +990,76 @@ def _(
         _grouping_figures_dir = FIGURES_DIR / _grouping_level
         _mean_absolute = fingerprint_matrices[_grouping_level]["mean_absolute"]
         _fraction_altered = fingerprint_matrices[_grouping_level]["fraction_altered"]
+        _title_prefix = _grouping_level.replace("_", " ").title()
 
         if not _mean_absolute.empty:
             _relative_shape = _mean_absolute.divide(
                 _mean_absolute.max(axis=0).replace(0, np.nan), axis=1
             ).fillna(0)
 
-            plot_condition_radar_grid(
+            _fig = plot_condition_radar_grid(
                 _mean_absolute,
-                title=f"{_grouping_level.replace('_', ' ').title()} — Mean absolute effect",
+                title=f"{_title_prefix} — Mean absolute effect",
                 output_path=_grouping_figures_dir / "mean_absolute_radar_grid.png",
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
             )
+            if _fig is not None:
+                radar_figs_by_label[f"{_title_prefix} — Mean absolute effect"] = _fig
 
             if HAS_DOSE_AXIS:
-                plot_dose_overlay_radars(
+                _fig = plot_dose_overlay_radars(
                     _mean_absolute,
                     condition_table=condition_table,
                     treatment_column=TREATMENT_COL,
                     concentration_column=CONDITION_CONC_COL,
-                    title=f"{_grouping_level.replace('_', ' ').title()} — Dose overlays",
+                    title=f"{_title_prefix} — Dose overlays",
                     output_path=_grouping_figures_dir / "mean_absolute_dose_overlay.png",
                     max_columns=RADAR_MAX_COLUMNS,
                     dpi=FIGURE_DPI,
                 )
+                if _fig is not None:
+                    radar_figs_by_label[f"{_title_prefix} — Dose overlays"] = _fig
 
-            plot_condition_radar_grid(
+            _fig = plot_condition_radar_grid(
                 _relative_shape,
-                title=f"{_grouping_level.replace('_', ' ').title()} — Relative fingerprint shape",
+                title=f"{_title_prefix} — Relative fingerprint shape",
                 output_path=_grouping_figures_dir / "relative_shape_radar_grid.png",
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
             )
+            if _fig is not None:
+                radar_figs_by_label[f"{_title_prefix} — Relative fingerprint shape"] = _fig
 
         if not _fraction_altered.empty:
-            plot_condition_radar_grid(
+            _fig = plot_condition_radar_grid(
                 _fraction_altered,
-                title=f"{_grouping_level.replace('_', ' ').title()} — Fraction of altered features",
+                title=f"{_title_prefix} — Fraction of altered features",
                 output_path=_grouping_figures_dir / "fraction_altered_radar_grid.png",
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
             )
+            if _fig is not None:
+                radar_figs_by_label[f"{_title_prefix} — Fraction of altered features"] = _fig
 
     print(f"✓ Radar plots generated for {len(RADAR_GROUPINGS)} grouping level(s).")
+    return (radar_figs_by_label,)
+
+
+@app.cell
+def _(mo, radar_figs_by_label):
+    radar_picker = mo.ui.dropdown(
+        options=list(radar_figs_by_label),
+        value=next(iter(radar_figs_by_label), None),
+        label=f"Radar plot to view ({len(radar_figs_by_label)} available — all saved to disk regardless)",
+    )
+    radar_picker
+    return (radar_picker,)
+
+
+@app.cell
+def _(radar_figs_by_label, radar_picker):
+    radar_figs_by_label.get(radar_picker.value)
     return
 
 
@@ -1050,6 +1102,7 @@ def _(
     special_treatments_input,
 ):
     _special_treatments = set(special_treatments_input.value)
+    special_figs_by_label = {}
 
     if _special_treatments:
         _special_condition_labels = condition_table.loc[
@@ -1069,17 +1122,40 @@ def _(
             if not _available:
                 continue
 
-            plot_condition_radar_grid(
+            _label = f"Special conditions — {_grouping_level.replace('_', ' ').title()}"
+            _fig = plot_condition_radar_grid(
                 _matrix[_available],
-                title=f"Special conditions — {_grouping_level.replace('_', ' ').title()}",
+                title=_label,
                 output_path=_special_figures_dir / f"{_grouping_level}_mean_absolute.png",
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
             )
+            if _fig is not None:
+                special_figs_by_label[_label] = _fig
 
         print(f"✓ Special-condition radar panels generated for: {sorted(_special_treatments)}")
     else:
         print("No special treatments selected — skipping the special-condition panel section.")
+    return (special_figs_by_label,)
+
+
+@app.cell
+def _(mo, special_figs_by_label):
+    if not special_figs_by_label:
+        special_picker = mo.ui.dropdown(options=["(none)"], value="(none)", label="Special-condition panel to view")
+    else:
+        special_picker = mo.ui.dropdown(
+            options=list(special_figs_by_label),
+            value=next(iter(special_figs_by_label)),
+            label=f"Special-condition panel to view ({len(special_figs_by_label)} available)",
+        )
+    special_picker
+    return (special_picker,)
+
+
+@app.cell
+def _(special_figs_by_label, special_picker):
+    special_figs_by_label.get(special_picker.value)
     return
 
 
@@ -1228,7 +1304,7 @@ def _(
     provenance = {
         "schema_version": 1,
         "pipeline": {
-            "notebook": "04_phenotypic_fingerprints.py",
+            "notebook": "05_phenotypic_fingerprints.py",
             "experiment_id": EXPERIMENT_ID,
             "executed_at_utc": datetime.now(timezone.utc).isoformat(),
         },
@@ -1363,12 +1439,12 @@ def _(
 
     if integrity_errors:
         raise RuntimeError(
-            "\nNB04 integrity checks failed\n============================\n\n"
+            "\nNB05 integrity checks failed\n============================\n\n"
             + "\n".join(f"  - {e}" for e in integrity_errors)
         )
 
     print("═" * 72)
-    print("NB04 COMPLETED")
+    print("NB05 COMPLETED")
     print("═" * 72)
     print("✓ All final integrity checks passed\n")
     print(f"  Experiment:          {EXPERIMENT_ID}")
@@ -1381,7 +1457,27 @@ def _(
     print(f"    {RESULTS_DIR}")
     print("\n  Figures:")
     print(f"    {FIGURES_DIR}")
-    print("\nNext step: NB05 — Quality metrics")
+    print("\nNext step: NB06 — Single-cell analysis")
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
     return
 
 

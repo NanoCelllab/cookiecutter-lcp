@@ -36,8 +36,10 @@ __all__ = [
     "filter_high_missingness_features",
     "impute_missing_median",
     "clean_features_before_normalization",
+    "drop_near_zero_mad_features",
     "resolve_normalization_control",
     "normalize_per_plate_mad_robustize",
+    "drop_extreme_magnitude_features",
 ]
 
 
@@ -114,6 +116,57 @@ def clean_features_before_normalization(
     return df_imputed, remaining, summary
 
 
+def drop_near_zero_mad_features(
+    df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    *,
+    plate_col: str,
+    control_col: str,
+    negcon_values: Sequence[str],
+    norm_control: str,
+    mad_epsilon: float = 1e-3,
+) -> tuple[pd.DataFrame, list[str], list[dict]]:
+    """Drop features whose negative-control MAD is near-zero in any plate.
+
+    ``mad_robustize`` divides each feature by its negative-control MAD. A
+    feature that is (near-)constant within a given plate's negative controls
+    has a MAD near zero there, and pycytominer's small fixed epsilon in that
+    division is not enough to prevent the result from blowing up to an
+    enormous, numerically meaningless magnitude (observed on a real dataset:
+    a vesicle/nucleolus child-object count feature, near-constant per plate,
+    reached ~1e19 after normalization). That corrupted feature then dominates
+    any downstream correlation/cosine similarity computation.
+
+    This must run *before* normalization, not after: once the blow-up has
+    happened, the feature's variance looks artificially *high*, so a
+    post-normalization ``variance_threshold`` feature-selection step cannot
+    catch it -- it only removes low-variance features.
+
+    Returns ``(df_without_dropped_columns, remaining_feature_cols, removed_report)``,
+    where ``removed_report`` has one ``{"feature", "plate", "mad"}`` entry per
+    (feature, plate) combination that triggered removal, for auditability.
+    """
+    norm_ctrl = resolve_normalization_control(df, control_col, negcon_values, norm_control)
+
+    near_zero_mad_features: dict[str, list[dict]] = {}
+    for plate, sub in df.groupby(plate_col, sort=False):
+        controls = sub.loc[sub[control_col] == norm_ctrl, feature_cols]
+        if controls.empty:
+            continue
+        mad = (controls - controls.median()).abs().median()
+        for feature, value in mad.items():
+            if value < mad_epsilon:
+                near_zero_mad_features.setdefault(feature, []).append(
+                    {"feature": feature, "plate": plate, "mad": float(value)}
+                )
+
+    removed = sorted(near_zero_mad_features)
+    removed_report = [record for records in near_zero_mad_features.values() for record in records]
+    remaining = [c for c in feature_cols if c not in near_zero_mad_features]
+    df_out = df.drop(columns=removed) if removed else df.copy()
+    return df_out, remaining, removed_report
+
+
 def resolve_normalization_control(
     df: pd.DataFrame,
     control_col: str,
@@ -187,3 +240,27 @@ def normalize_per_plate_mad_robustize(
         norm_parts.append(sub_norm)
 
     return pd.concat(norm_parts, axis=0, ignore_index=True)
+
+
+def drop_extreme_magnitude_features(
+    df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    max_abs_value: float = 100.0,
+) -> tuple[pd.DataFrame, list[str], dict[str, float]]:
+    """Drop normalized features whose magnitude is implausibly large.
+
+    A safety net independent of *why* a feature ended up this way --
+    :func:`drop_near_zero_mad_features` prevents the specific near-zero-MAD
+    cause, but this check protects against any other future cause of the
+    same symptom. A genuinely MAD-robustized feature should be a small
+    number even for a strong biological outlier; anything past
+    ``max_abs_value`` is a numerical artifact, not biology, and would
+    otherwise dominate any downstream correlation/distance computation.
+
+    Returns ``(df_without_dropped_columns, remaining_feature_cols, removed_with_max_abs)``.
+    """
+    max_abs = df[feature_cols].abs().max()
+    removed = max_abs[max_abs > max_abs_value].sort_values(ascending=False)
+    remaining = [c for c in feature_cols if c not in removed.index]
+    df_out = df.drop(columns=removed.index.tolist()) if not removed.empty else df.copy()
+    return df_out, remaining, removed.to_dict()

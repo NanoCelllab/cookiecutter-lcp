@@ -221,6 +221,9 @@ def fit_hdbscan(
         metric=metric,
         cluster_selection_method="eom",
         prediction_data=True,
+        # Keep notebook execution portable to CI, containers, and other
+        # environments where process semaphores or CPU discovery are limited.
+        core_dist_n_jobs=1,
     )
     return clusterer.fit_predict(X)
 

@@ -14,10 +14,17 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 03 — Phenotypic Profiling
+    # 04 — Phenotypic Profiling
     ## PCA · UMAP · Profile QC · Optional Batch Correction · LDA · Feature Importance · Clustering
 
-    **Pipeline step:** 3 of 5
+    **Pipeline step:** 4 of 6
+    **Position in pipeline:** NB03 (quality metrics, Go/No-Go) → **NB04 (phenotypic profiling)** → NB05 (phenotypic fingerprints)
+
+    This notebook is meant to be run interactively (`marimo edit`), not
+    headlessly: NB03's Go/No-Go gate has already checked replicate signal,
+    but interpreting PCA/UMAP structure, choosing the final modelling space,
+    and judging cluster quality below are human-in-the-loop decisions.
+
     **Input:** `per_well_features_selected.parquet` (from NB02), optional `cv_summary.csv` (from NB02)
     **Output:** profile-QC summaries, PCA/UMAP figures, optional Harmony-corrected coordinates,
     LDA models, loadings, CV results, confusion matrices, KMeans models, phenotypic fingerprints,
@@ -98,7 +105,20 @@ def _():
     )
 
     UMAP_OK = _UMAP_OK
-    return PCA, Path, UMAP, UMAP_OK, datetime, joblib, json, np, pd, plt, replace, subprocess
+    return (
+        PCA,
+        Path,
+        UMAP,
+        UMAP_OK,
+        datetime,
+        joblib,
+        json,
+        np,
+        pd,
+        plt,
+        replace,
+        subprocess,
+    )
 
 
 @app.cell
@@ -157,7 +177,6 @@ def _(Path):
         absolute_change,
         build_fingerprint_matrix,
         calculate_within_plate_effects,
-        cohens_d,
         get_qc_metric,
         infer_feature_cols,
         plot_fingerprint_heatmap,
@@ -224,8 +243,17 @@ def _(loaded_config, mo):
         value=loaded_config.overwrite_existing_outputs,
         label="Overwrite existing outputs",
     )
-    mo.vstack([run_analysis_spaces_input, final_modelling_space_input, overwrite_input])
-    return final_modelling_space_input, overwrite_input, run_analysis_spaces_input
+    save_history_input = mo.ui.checkbox(
+        value=loaded_config.save_provenance_history,
+        label="Save timestamped provenance history",
+    )
+    mo.vstack([run_analysis_spaces_input, final_modelling_space_input, overwrite_input, save_history_input])
+    return (
+        final_modelling_space_input,
+        overwrite_input,
+        run_analysis_spaces_input,
+        save_history_input,
+    )
 
 
 @app.cell
@@ -324,11 +352,13 @@ def _(
     overwrite_input,
     random_state_input,
     run_analysis_spaces_input,
+    save_history_input,
 ):
     EXPERIMENT_ID = experiment_id_input.value
     RUN_ANALYSIS_SPACES = list(run_analysis_spaces_input.value)
     FINAL_MODELLING_SPACE = final_modelling_space_input.value
     OVERWRITE_EXISTING_OUTPUTS = bool(overwrite_input.value)
+    SAVE_PROVENANCE_HISTORY = bool(save_history_input.value)
 
     RANDOM_STATE = int(random_state_input.value)
     N_PCA_COMPONENTS = int(n_pca_components_input.value)
@@ -354,12 +384,13 @@ def _(
         )
 
     print("═" * 72)
-    print("NB03 CONFIGURATION")
+    print("NB04 CONFIGURATION")
     print("═" * 72)
     print(f"  Experiment ID          : {EXPERIMENT_ID}")
     print(f"  Modelling spaces       : {RUN_ANALYSIS_SPACES}")
     print(f"  Final modelling space  : {FINAL_MODELLING_SPACE}")
     print(f"  Overwrite outputs      : {OVERWRITE_EXISTING_OUTPUTS}")
+    print(f"  Save provenance history: {SAVE_PROVENANCE_HISTORY}")
     print(f"  Random seed            : {RANDOM_STATE}")
     return (
         BATCH_R2_WARN_THRESHOLD,
@@ -378,11 +409,18 @@ def _(
         OVERWRITE_EXISTING_OUTPUTS,
         RANDOM_STATE,
         RUN_ANALYSIS_SPACES,
+        SAVE_PROVENANCE_HISTORY,
     )
 
 
 @app.cell
-def _(EXPERIMENT_ID, OVERWRITE_EXISTING_OUTPUTS, loaded_config, replace):
+def _(
+    EXPERIMENT_ID,
+    OVERWRITE_EXISTING_OUTPUTS,
+    SAVE_PROVENANCE_HISTORY,
+    loaded_config,
+    replace,
+):
     # Column names/vocabulary are resolved against the real data once it is
     # loaded (see "resolve CONFIG" cell below); this draft only carries the
     # experiment-identity and output-protection choices made above.
@@ -390,6 +428,7 @@ def _(EXPERIMENT_ID, OVERWRITE_EXISTING_OUTPUTS, loaded_config, replace):
         loaded_config,
         experiment_id=EXPERIMENT_ID,
         overwrite_existing_outputs=OVERWRITE_EXISTING_OUTPUTS,
+        save_provenance_history=SAVE_PROVENANCE_HISTORY,
     )
     return (WIDGET_CONFIG,)
 
@@ -768,6 +807,7 @@ def _(FIGS_DIR, N_PCA_COMPONENTS, PCA, RANDOM_STATE, X, np, plt):
     _fig.savefig(FIGS_DIR / "pca_scree.png", dpi=150, bbox_inches="tight")
     plt.close(_fig)
     print(f"  PC1: {_evr[0]:.1%}  |  PC2: {_evr[1]:.1%}  |  Top-{_n_show}: {_evr.sum():.1%}")
+    _fig
     return X_pca, pca_full
 
 
@@ -793,6 +833,7 @@ def _(CONFIG, FIGS_DIR, X_pca, df, pca_full, plt, scatter_panel):
     plt.close(_fig)
     print("  ✓  Saved: pca_scatter.png")
     print("  SC-11: Check that the middle panel shows no plate-specific clusters.")
+    _fig
     return
 
 
@@ -805,7 +846,17 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, FIGS_DIR, RANDOM_STATE, UMAP, UMAP_OK, X_pca, df, plt, scatter_panel):
+def _(
+    CONFIG,
+    FIGS_DIR,
+    RANDOM_STATE,
+    UMAP,
+    UMAP_OK,
+    X_pca,
+    df,
+    plt,
+    scatter_panel,
+):
     if UMAP_OK:
         _reducer = UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=RANDOM_STATE, n_jobs=1)
         X_umap = _reducer.fit_transform(X_pca)
@@ -826,9 +877,12 @@ def _(CONFIG, FIGS_DIR, RANDOM_STATE, UMAP, UMAP_OK, X_pca, df, plt, scatter_pan
         _fig.savefig(FIGS_DIR / "umap_scatter.png", dpi=150, bbox_inches="tight")
         plt.close(_fig)
         print("  ✓  Saved: umap_scatter.png")
+        _display = _fig
     else:
         X_umap = None
         print("  ⚠️  UMAP skipped. Install with: pip install umap-learn")
+        _display = None
+    _display
     return
 
 
@@ -845,7 +899,17 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, FIGS_DIR, PCA, RANDOM_STATE, X, df, negcon_mask, plt, scatter_panel):
+def _(
+    CONFIG,
+    FIGS_DIR,
+    PCA,
+    RANDOM_STATE,
+    X,
+    df,
+    negcon_mask,
+    plt,
+    scatter_panel,
+):
     if int(negcon_mask.sum()) >= 6 and df.loc[negcon_mask, CONFIG.plate_col].nunique() >= 2:
         X_negcon = X[negcon_mask.to_numpy()]
         _pca_negcon = PCA(
@@ -863,10 +927,13 @@ def _(CONFIG, FIGS_DIR, PCA, RANDOM_STATE, X, df, negcon_mask, plt, scatter_pane
         _fig.tight_layout()
         _fig.savefig(FIGS_DIR / "profile_qc_negcon_pca.png", dpi=150, bbox_inches="tight")
         plt.close(_fig)
+        _display = _fig
     else:
         X_negcon = None
         X_negcon_pca = None
         print("  ⚠️  Too few negative controls or plates for a controls-only PCA.")
+        _display = None
+    _display
     return X_negcon, X_negcon_pca
 
 
@@ -1060,6 +1127,7 @@ def _(
     df,
     joblib,
     meta_cols,
+    mo,
     negcon_mask,
     pd,
     plt,
@@ -1082,6 +1150,7 @@ def _(
         return write_csv_protected(out_df, path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
 
     analysis_results = {}
+    _figures_to_display = []
     for _space_name in RUN_ANALYSIS_SPACES:
         _space = MODELLING_SPACES[_space_name]
         _directories = SPACE_DIRECTORIES[_space_name]
@@ -1137,6 +1206,7 @@ def _(
                 dpi=150, bbox_inches="tight",
             )
             plt.close(_fig)
+            _figures_to_display.append(_fig)
 
         _treatment_lda = _result.get("treatment_lda", {})
         if isinstance(_treatment_lda.get("cv"), pd.DataFrame):
@@ -1187,6 +1257,7 @@ def _(
                 dpi=150, bbox_inches="tight",
             )
             plt.close(_fig)
+            _figures_to_display.append(_fig)
         if _dose_lda.get("model") is not None:
             joblib.dump(
                 _dose_lda["model"],
@@ -1213,6 +1284,7 @@ def _(
         )
         print(f"  ✓ analysis_summary.csv {_status}")
         print(f"  Summary: {_result['summary']}")
+    mo.vstack(_figures_to_display) if _figures_to_display else None
     return (analysis_results,)
 
 
@@ -1227,7 +1299,7 @@ def _(mo):
     with negative controls, preferably combined within-plate.
 
     Detailed feature-level inspection and expanded radar analyses live in
-    `04_phenotypic_fingerprints.py`; this notebook retains only the compact overview needed to
+    `05_phenotypic_fingerprints.py`; this notebook retains only the compact overview needed to
     contextualize the modelling results above (mirroring the source notebook's own scope note).
     """)
     return
@@ -1376,62 +1448,74 @@ def _(
 
 
 @app.cell
-def _(FINGERPRINT_EFFECT_THRESHOLD, FINGERPRINT_FIGURES_DIR, fingerprint_tables, plot_fingerprint_heatmap):
+def _(
+    FINGERPRINT_EFFECT_THRESHOLD,
+    FINGERPRINT_FIGURES_DIR,
+    fingerprint_tables,
+    mo,
+    plot_fingerprint_heatmap,
+):
     # The saved CSVs (previous cell) keep the "Other" feature-category row for
     # completeness; heatmaps drop it, matching the source notebook's plotting
     # helper (which visually excludes "Other" but never removed it from disk).
-    plot_fingerprint_heatmap(
-        fingerprint_tables["mean_absolute"].drop(index="Other", errors="ignore"),
-        title="Phenotypic fingerprint by feature category",
-        colorbar_label="Mean absolute effect vs negative control",
-        output_path=FINGERPRINT_FIGURES_DIR / "mean_absolute_heatmap.png",
-    )
-    plot_fingerprint_heatmap(
-        fingerprint_tables["mean_signed"].drop(index="Other", errors="ignore"),
-        title="Directional phenotypic effect by feature category",
-        colorbar_label="Mean signed effect vs negative control",
-        output_path=FINGERPRINT_FIGURES_DIR / "mean_signed_heatmap.png",
-        diverging=True,
-    )
-    plot_fingerprint_heatmap(
-        fingerprint_tables["max_absolute"].drop(index="Other", errors="ignore"),
-        title="Maximum absolute effect by feature category",
-        colorbar_label="Maximum absolute effect vs negative control",
-        output_path=FINGERPRINT_FIGURES_DIR / "max_absolute_heatmap.png",
-    )
-    plot_fingerprint_heatmap(
-        fingerprint_tables["fraction_changed"].drop(index="Other", errors="ignore"),
-        title="Fraction of altered features by category",
-        colorbar_label=f"Fraction with |effect| ≥ {FINGERPRINT_EFFECT_THRESHOLD:g}",
-        output_path=FINGERPRINT_FIGURES_DIR / "fraction_changed_heatmap.png",
-        fixed_range=(0, 1),
-    )
+    _heatmap_figs = [
+        plot_fingerprint_heatmap(
+            fingerprint_tables["mean_absolute"].drop(index="Other", errors="ignore"),
+            title="Phenotypic fingerprint by feature category",
+            colorbar_label="Mean absolute effect vs negative control",
+            output_path=FINGERPRINT_FIGURES_DIR / "mean_absolute_heatmap.png",
+        ),
+        plot_fingerprint_heatmap(
+            fingerprint_tables["mean_signed"].drop(index="Other", errors="ignore"),
+            title="Directional phenotypic effect by feature category",
+            colorbar_label="Mean signed effect vs negative control",
+            output_path=FINGERPRINT_FIGURES_DIR / "mean_signed_heatmap.png",
+            diverging=True,
+        ),
+        plot_fingerprint_heatmap(
+            fingerprint_tables["max_absolute"].drop(index="Other", errors="ignore"),
+            title="Maximum absolute effect by feature category",
+            colorbar_label="Maximum absolute effect vs negative control",
+            output_path=FINGERPRINT_FIGURES_DIR / "max_absolute_heatmap.png",
+        ),
+        plot_fingerprint_heatmap(
+            fingerprint_tables["fraction_changed"].drop(index="Other", errors="ignore"),
+            title="Fraction of altered features by category",
+            colorbar_label=f"Fraction with |effect| ≥ {FINGERPRINT_EFFECT_THRESHOLD:g}",
+            output_path=FINGERPRINT_FIGURES_DIR / "fraction_changed_heatmap.png",
+            fixed_range=(0, 1),
+        ),
+    ]
     print("  ✓  Fingerprint heatmaps saved.")
+    mo.vstack([f for f in _heatmap_figs if f is not None])
     return
 
 
 @app.cell
-def _(FINGERPRINT_FIGURES_DIR, fingerprint_tables):
+def _(FINGERPRINT_FIGURES_DIR, fingerprint_tables, mo):
     from hca_pipeline.plotting import plot_condition_radar_grid
 
     # Small-multiples radar overview (one panel per condition). The source
     # notebook additionally laid these out in a treatment x concentration grid
     # with per-treatment shared axes; that richer layout is deliberately left
-    # to 04_phenotypic_fingerprints.py (as the source notebook's own docstring
+    # to 05_phenotypic_fingerprints.py (as the source notebook's own docstring
     # says: "expanded LCP radar analyses are performed in
     # 04_phenotypic_fingerprints.ipynb"). This section keeps only a compact
     # overview using the shared plotting helper as-is.
-    plot_condition_radar_grid(
-        fingerprint_tables["mean_absolute"].drop(index="Other", errors="ignore"),
-        title="Phenotypic fingerprint magnitude",
-        output_path=FINGERPRINT_FIGURES_DIR / "mean_absolute_radar_small_multiples.png",
-    )
-    plot_condition_radar_grid(
-        fingerprint_tables["fraction_changed"].drop(index="Other", errors="ignore"),
-        title="Breadth of phenotypic response",
-        output_path=FINGERPRINT_FIGURES_DIR / "fraction_changed_radar_small_multiples.png",
-    )
+    _radar_figs = [
+        plot_condition_radar_grid(
+            fingerprint_tables["mean_absolute"].drop(index="Other", errors="ignore"),
+            title="Phenotypic fingerprint magnitude",
+            output_path=FINGERPRINT_FIGURES_DIR / "mean_absolute_radar_small_multiples.png",
+        ),
+        plot_condition_radar_grid(
+            fingerprint_tables["fraction_changed"].drop(index="Other", errors="ignore"),
+            title="Breadth of phenotypic response",
+            output_path=FINGERPRINT_FIGURES_DIR / "fraction_changed_radar_small_multiples.png",
+        ),
+    ]
     print("  ✓  Fingerprint radar overview saved.")
+    mo.vstack([f for f in _radar_figs if f is not None])
     return
 
 
@@ -1626,8 +1710,11 @@ def _(
         _fig.savefig(COMPARISON_FIGURES_DIR / "umap_uncorrected_vs_harmony.png", dpi=180, bbox_inches="tight")
         plt.close(_fig)
         print("  ✓  Saved side-by-side UMAP comparison.")
+        _display = _fig
     else:
         print("  ℹ️  Side-by-side UMAP comparison skipped (needs both spaces + UMAP installed).")
+        _display = None
+    _display
     return
 
 
@@ -1673,7 +1760,7 @@ def _(
         _git_hash = "unknown"
 
     _common_provenance = {
-        "notebook": "03_phenotypic_profiling.py",
+        "notebook": "04_phenotypic_profiling.py",
         "experiment_id": CONFIG.experiment_id,
         "timestamp": datetime.datetime.now().isoformat(),
         "git_hash": _git_hash,
@@ -1693,6 +1780,17 @@ def _(
         "n_fingerprint_conditions": len(condition_order),
     }
 
+    _timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+
+    def _write_with_optional_history(directory, payload):
+        _path = validate_output_path(directory / "provenance.json", OVERWRITE_EXISTING_OUTPUTS)
+        _path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        if CONFIG.save_provenance_history:
+            _history_path = directory / f"provenance_{_timestamp}.json"
+            if _history_path.exists():
+                raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
+            _history_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     for _space_name in RUN_ANALYSIS_SPACES:
         _provenance = {
             **_common_provenance,
@@ -1700,8 +1798,7 @@ def _(
             "space_description": MODELLING_SPACES[_space_name]["description"],
             "output_directories": {k: str(v) for k, v in SPACE_DIRECTORIES[_space_name].items()},
         }
-        _path = validate_output_path(SPACE_DIRECTORIES[_space_name]["results"] / "provenance.json", OVERWRITE_EXISTING_OUTPUTS)
-        _path.write_text(json.dumps(_provenance, indent=2), encoding="utf-8")
+        _write_with_optional_history(SPACE_DIRECTORIES[_space_name]["results"], _provenance)
 
     _comparison_provenance = {
         **_common_provenance,
@@ -1710,11 +1807,11 @@ def _(
         "comparison_results_dir": str(COMPARISON_RESULTS_DIR),
         "comparison_figures_dir": str(COMPARISON_FIGURES_DIR),
     }
-    _comparison_path = validate_output_path(COMPARISON_RESULTS_DIR / "provenance.json", OVERWRITE_EXISTING_OUTPUTS)
-    _comparison_path.write_text(json.dumps(_comparison_provenance, indent=2), encoding="utf-8")
+    _write_with_optional_history(COMPARISON_RESULTS_DIR, _comparison_provenance)
+    print(f"Historical record           : {'enabled' if CONFIG.save_provenance_history else 'disabled'}")
 
     print("═" * 72)
-    print("NB03 COMPLETE")
+    print("NB04 COMPLETE")
     print("═" * 72)
     print(f"Spaces run                 : {', '.join(RUN_ANALYSIS_SPACES)}")
     print(f"Automated recommendation    : {recommendation}")
@@ -1767,16 +1864,21 @@ def _(
 
     if _integrity_errors:
         raise RuntimeError(
-            "\nNB03 integrity checks failed\n============================\n\n"
+            "\nNB04 integrity checks failed\n============================\n\n"
             + "\n".join(f"  - {e}" for e in _integrity_errors)
         )
 
     print("═" * 72)
-    print("NB03 INTEGRITY CHECKS PASSED")
+    print("NB04 INTEGRITY CHECKS PASSED")
     print("═" * 72)
     print(f"  Wells profiled          : {len(df):,}")
     print(f"  Spaces run              : {', '.join(RUN_ANALYSIS_SPACES)}")
     print("✓ All final integrity checks passed")
+    return
+
+
+@app.cell
+def _():
     return
 
 

@@ -73,8 +73,11 @@ __all__ = [
     "plot_per_plate_qc",
     "run_cross_plate_batch",
     "plot_cross_plate_batch",
+    "dose_response_monotonicity_spearman",
     "run_dose_response",
     "plot_dose_response",
+    "EFFECT_DETECTABILITY_QUADRANTS",
+    "classify_effect_detectability",
     "run_treatment_vs_control",
     "plot_treatment_vs_control",
     "run_time_course",
@@ -533,7 +536,29 @@ def crossvalidate_scratch_vs_copairs_map(
     seed: int = 42,
     agreement_threshold: float = 0.02,
 ) -> dict[str, Any]:
-    """Cross-validate the from-scratch (Pearson) global mAP against copairs (cosine).
+    """Compare the from-scratch (Pearson) global mAP against two copairs runs.
+
+    This intentionally separates two different questions that the source
+    notebook's single Pearson-vs-cosine comparison conflated:
+
+    1. **Implementation check** (``distance="correlation"``, i.e. Pearson —
+       the same similarity metric as the from-scratch implementation). Since
+       both sides rank neighbors identically, a disagreement beyond
+       ``agreement_threshold`` here is a genuine signal that one of the two
+       implementations has a bug — this is the only one of the two with a
+       pass/fail threshold.
+    2. **Sensitivity analysis** (``distance="cosine"``, copairs' default). This
+       uses a *different* similarity metric than the from-scratch implementation
+       by design, so Pearson-correlation-based and cosine-based neighbor
+       rankings are expected to disagree even when both implementations are
+       correct — there is no pass/fail threshold for this comparison, since a
+       fixed agreement threshold would conflate "different similarity metric,
+       as designed" with "implementation bug."
+
+    Both copairs runs also differ from the from-scratch result in aggregation
+    (copairs reports a macro-average across treatments; from-scratch reports a
+    micro-average across all profiles) — a small, expected difference in the
+    summary statistic, not in the per-treatment AP values themselves.
 
     Ports the source notebook's Section 3 cross-validation cell. That cell
     keyed into the copairs result with the literal string
@@ -544,31 +569,52 @@ def crossvalidate_scratch_vs_copairs_map(
     labels = df[treatment_col].values
 
     map_fs, per_treat_fs, _ = mean_average_precision(profiles, labels, plate_labels=None)
-    map_cp = copairs_compute_map(
-        df, feat_cols,
-        pos_sameby=[treatment_col],
-        neg_diffby=[treatment_col],
-        null_size=null_size, seed=seed,
-    )
 
-    cp_dict = dict(zip(map_cp[treatment_col], map_cp["mean_average_precision"]))
+    def _copairs_map_by_treatment(distance: str) -> tuple[dict[Any, float], float]:
+        result = copairs_compute_map(
+            df, feat_cols,
+            pos_sameby=[treatment_col],
+            neg_diffby=[treatment_col],
+            null_size=null_size, seed=seed, distance=distance,
+        )
+        return (
+            dict(zip(result[treatment_col], result["mean_average_precision"])),
+            float(result["mean_average_precision"].mean()),
+        )
 
-    per_treatment_diff = {}
-    max_diff = 0.0
-    for trt, fs in per_treat_fs.items():
-        cp = cp_dict.get(trt, np.nan)
-        diff = cp - fs
-        per_treatment_diff[trt] = {"from_scratch": fs, "copairs": cp, "diff": diff}
-        if np.isfinite(diff):
-            max_diff = max(max_diff, abs(diff))
+    def _per_treatment_diff(cp_dict: dict[Any, float]) -> tuple[dict[Any, dict[str, float]], float]:
+        per_treatment = {}
+        max_diff = 0.0
+        for trt, fs in per_treat_fs.items():
+            cp = cp_dict.get(trt, np.nan)
+            diff = cp - fs
+            per_treatment[trt] = {"from_scratch": fs, "copairs": cp, "diff": diff}
+            if np.isfinite(diff):
+                max_diff = max(max_diff, abs(diff))
+        return per_treatment, max_diff
+
+    cp_pearson_dict, map_cp_pearson_macro = _copairs_map_by_treatment("correlation")
+    cp_cosine_dict, map_cp_cosine_macro = _copairs_map_by_treatment("cosine")
+
+    implementation_per_treatment, implementation_max_diff = _per_treatment_diff(cp_pearson_dict)
+    sensitivity_per_treatment, sensitivity_max_diff = _per_treatment_diff(cp_cosine_dict)
 
     return {
         "map_from_scratch_micro": map_fs,
-        "map_copairs_macro": float(map_cp["mean_average_precision"].mean()),
-        "per_treatment": per_treatment_diff,
-        "max_abs_diff": max_diff,
-        "agrees": max_diff <= agreement_threshold,
-        "agreement_threshold": agreement_threshold,
+        "implementation_check": {
+            "distance": "correlation",
+            "map_copairs_macro": map_cp_pearson_macro,
+            "per_treatment": implementation_per_treatment,
+            "max_abs_diff": implementation_max_diff,
+            "agrees": implementation_max_diff <= agreement_threshold,
+            "agreement_threshold": agreement_threshold,
+        },
+        "sensitivity_analysis": {
+            "distance": "cosine",
+            "map_copairs_macro": map_cp_cosine_macro,
+            "per_treatment": sensitivity_per_treatment,
+            "max_abs_diff": sensitivity_max_diff,
+        },
     }
 
 
@@ -928,6 +974,136 @@ def plot_cross_plate_batch(batch_result: dict, output_path: str | None = None):
 # Section 6 — Application C: dose-response consistency
 # ─────────────────────────────────────────────────────────────────────────────
 
+def dose_response_monotonicity_spearman(
+    df_trt: pd.DataFrame,
+    feat_cols: Sequence[str],
+    dose_col: str,
+    doses: Sequence[float],
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+    rho_no_structure_band: float = 0.1,
+) -> dict[str, Any]:
+    """Continuous complement to SC-21's binary adjacent-vs-non-adjacent test.
+
+    SC-21 asks a binary question (is mean adjacent-dose similarity greater
+    than mean non-adjacent-dose similarity?) that can flip PASS/FAIL from a
+    small numerical wobble when only a few dose levels are available. This
+    computes the Spearman correlation between dose separation
+    (``|dose_i - dose_j|``) and phenotypic distance (``1 - Pearson
+    correlation`` between the two doses' mean profiles) across every pair of
+    dose levels for one treatment — a continuous monotonicity descriptor,
+    not a threshold.
+
+    ``rho > 0`` means profiles grow more dissimilar as dose separation grows
+    (consistent with a monotonic dose-response trajectory); ``rho < 0``
+    means the opposite; values within ``rho_no_structure_band`` of zero are
+    reported as no clear ordered structure. That banding is a reporting
+    convenience, not a statistical test.
+
+    With as few as 2-4 dose levels (the common case), there are only
+    ``C(n_doses, 2)`` data points, which is too few for a meaningful
+    permutation test over dose orderings (e.g. only 3! = 6 possible
+    orderings for 3 doses). Instead, uncertainty on rho is estimated by
+    bootstrapping over *replicate wells within each dose* — resampling which
+    wells contribute to each dose's mean profile — which uses actual
+    within-dose replicate variability rather than the degenerate space of
+    dose-level permutations.
+
+    Returns a dict with ``rho``, ``p_value`` (asymptotic, from
+    ``scipy.stats.spearmanr`` — treat cautiously for n_dose_pairs < ~5),
+    ``rho_ci_low``/``rho_ci_high`` (bootstrap 95% CI, or ``None`` if too few
+    valid bootstrap draws), ``n_doses``, ``n_dose_pairs``, ``interpretation``,
+    and a ``note`` flagging the trajectory-descriptor-only caveat when
+    ``n_doses`` is small.
+    """
+    from scipy.stats import spearmanr
+
+    n_doses = len(doses)
+    if n_doses < 3:
+        return {
+            "n_doses": n_doses,
+            "n_dose_pairs": 0,
+            "rho": None,
+            "p_value": None,
+            "rho_ci_low": None,
+            "rho_ci_high": None,
+            "n_bootstrap_valid": 0,
+            "interpretation": None,
+            "note": "Fewer than 3 dose levels — a monotonicity trend is undefined.",
+        }
+
+    dose_wells = {d: df_trt.loc[df_trt[dose_col] == d, feat_cols].fillna(0).to_numpy() for d in doses}
+
+    def _dose_diffs_and_distances(mean_profiles: dict[float, np.ndarray]) -> tuple[list[float], list[float]]:
+        dose_diffs, distances = [], []
+        for i, d1 in enumerate(doses):
+            for d2 in doses[i + 1:]:
+                v1 = mean_profiles[d1] - mean_profiles[d1].mean()
+                v2 = mean_profiles[d2] - mean_profiles[d2].mean()
+                corr = np.corrcoef(v1, v2)[0, 1] if (np.std(v1) > 0 and np.std(v2) > 0) else 0.0
+                dose_diffs.append(abs(float(d2) - float(d1)))
+                distances.append(1.0 - corr)
+        return dose_diffs, distances
+
+    observed_means = {d: dose_wells[d].mean(axis=0) for d in doses}
+    dose_diffs, distances = _dose_diffs_and_distances(observed_means)
+    n_pairs = len(dose_diffs)
+
+    if len(set(dose_diffs)) < 2 or len(set(distances)) < 2:
+        rho, p_value = 0.0, 1.0
+    else:
+        rho, p_value = spearmanr(dose_diffs, distances)
+        rho, p_value = float(rho), float(p_value)
+
+    rng = np.random.RandomState(seed)
+    boot_rhos = []
+    for _ in range(n_bootstrap):
+        resampled_means = {}
+        for d in doses:
+            wells = dose_wells[d]
+            if len(wells) == 0:
+                continue
+            sample_idx = rng.randint(0, len(wells), size=len(wells))
+            resampled_means[d] = wells[sample_idx].mean(axis=0)
+        if len(resampled_means) < n_doses:
+            continue
+        b_diffs, b_distances = _dose_diffs_and_distances(resampled_means)
+        if len(set(b_diffs)) < 2 or len(set(b_distances)) < 2:
+            continue
+        b_rho, _ = spearmanr(b_diffs, b_distances)
+        if np.isfinite(b_rho):
+            boot_rhos.append(float(b_rho))
+
+    if len(boot_rhos) >= 100:
+        rho_ci_low, rho_ci_high = (float(v) for v in np.percentile(boot_rhos, [2.5, 97.5]))
+    else:
+        rho_ci_low, rho_ci_high = None, None
+
+    if rho > rho_no_structure_band:
+        interpretation = "increasing phenotypic separation with dose difference"
+    elif rho < -rho_no_structure_band:
+        interpretation = "potentially non-monotonic trajectory"
+    else:
+        interpretation = "no clear ordered dose-response structure"
+
+    return {
+        "n_doses": n_doses,
+        "n_dose_pairs": n_pairs,
+        "rho": rho,
+        "p_value": p_value,
+        "rho_ci_low": rho_ci_low,
+        "rho_ci_high": rho_ci_high,
+        "n_bootstrap_valid": len(boot_rhos),
+        "interpretation": interpretation,
+        "note": (
+            f"Only {n_pairs} dose-level pair(s) from {n_doses} dose levels — interpret as a "
+            "trajectory descriptor, not a well-powered significance test, unless more dose "
+            "levels or replicates are available."
+            if n_doses <= 4 else ""
+        ),
+    }
+
+
 def run_dose_response(
     df: pd.DataFrame,
     feat_cols: Sequence[str],
@@ -943,7 +1119,10 @@ def run_dose_response(
     or no multi-dose treatments are detected.
     """
     if dose_col is None or dose_col not in df.columns:
-        return {"message": "No concentration column detected — dose-response analysis skipped", "multi_dose_treatments": []}
+        return {
+            "message": "No concentration column detected — dose-response analysis skipped",
+            "multi_dose_treatments": [], "spearman_monotonicity": pd.DataFrame(),
+        }
 
     multi_dose, dose_counts = detect_dose_response_treatments(df, treatment_col, dose_col, min_doses)
 
@@ -951,9 +1130,10 @@ def run_dose_response(
         return {
             "message": "No multi-dose treatments detected — dose-response analysis skipped",
             "multi_dose_treatments": [], "dose_counts": dose_counts.to_dict(),
+            "spearman_monotonicity": pd.DataFrame(),
         }
 
-    results, sc21_results = [], []
+    results, sc21_results, spearman_results = [], [], []
     for trt in multi_dose:
         df_trt = df[df[treatment_col] == trt].copy()
         doses = sorted(df_trt[dose_col].unique())
@@ -1007,6 +1187,11 @@ def run_dose_response(
             "sc21_pass": sc21_pass, "note": sc21_note,
         })
 
+        # Continuous complement to SC-21 (see dose_response_monotonicity_spearman's
+        # docstring) -- descriptive only, does not gate SC-21's own pass/fail.
+        spearman_result = dose_response_monotonicity_spearman(df_trt, feat_cols, dose_col, doses, seed=seed)
+        spearman_results.append({"treatment": trt, **spearman_result})
+
     map_dose, _ = copairs_dose_response_map(df, feat_cols, treatment_col, dose_col, null_size=null_size_copairs, seed=seed)
 
     return {
@@ -1014,6 +1199,7 @@ def run_dose_response(
         "dose_correlations": results,
         "dose_map": map_dose,
         "sc21_status": pd.DataFrame(sc21_results),
+        "spearman_monotonicity": pd.DataFrame(spearman_results),
     }
 
 
@@ -1074,6 +1260,58 @@ def plot_dose_response(dose_result: dict, output_path: str | None = None):
 # Section 7 — Application D: treatment vs control separation
 # ─────────────────────────────────────────────────────────────────────────────
 
+EFFECT_DETECTABILITY_QUADRANTS: dict[tuple[bool, bool], dict[str, str]] = {
+    (True, True): {
+        "label": "Strong, consistent phenotype",
+        "interpretation": "Robust phenotypic signature with large and reproducible changes.",
+    },
+    (True, False): {
+        "label": "Strong but heterogeneous phenotype",
+        "interpretation": (
+            "Large effect size but heterogeneous response. The phenotype exists "
+            "but is not consistently recovered across samples."
+        ),
+    },
+    (False, True): {
+        "label": "Subtle but reproducible phenotype",
+        "interpretation": "Small but highly reproducible phenotype. Subtle biological changes that are consistently detected.",
+    },
+    (False, False): {
+        "label": "No detectable (or weak) phenotype",
+        "interpretation": "No detectable phenotypic signature, or changes indistinguishable from the negative control.",
+    },
+}
+
+
+def classify_effect_detectability(
+    cohens_d: float,
+    map_value: float,
+    *,
+    cohens_d_threshold: float = 0.5,
+    map_threshold: float = 0.5,
+) -> dict[str, Any]:
+    """Classify a treatment into one of four effect-size x detectability quadrants.
+
+    Cohen's d (effect *magnitude*) and mAP (retrieval *consistency*, i.e.
+    detectability) answer different questions -- a small but highly
+    reproducible phenotype can score higher on mAP than a large but
+    heterogeneous one. Looking at either metric alone can't distinguish
+    these cases; the quadrant of (high/low d, high/low mAP) can.
+
+    ``map_threshold=0.5`` matches the poscon-separation threshold already
+    used elsewhere in this module (SC-22's "poscon mAP > 0.5" check);
+    ``cohens_d_threshold=0.5`` matches the "medium effect" convention already
+    used as the fingerprint "altered feature" threshold elsewhere in this
+    pipeline (NB04/NB05), so neither threshold is a new, arbitrary choice.
+
+    Returns ``{"high_d", "high_map", "label", "interpretation"}``.
+    """
+    high_d = bool(np.isfinite(cohens_d) and abs(cohens_d) >= cohens_d_threshold)
+    high_map = bool(np.isfinite(map_value) and map_value >= map_threshold)
+    quadrant = EFFECT_DETECTABILITY_QUADRANTS[(high_d, high_map)]
+    return {"high_d": high_d, "high_map": high_map, **quadrant}
+
+
 def run_treatment_vs_control(
     df: pd.DataFrame,
     feat_cols: Sequence[str],
@@ -1121,6 +1359,7 @@ def run_treatment_vs_control(
     results = []
     for trt in sorted(cp_map.keys()):
         ctrl = trt_to_ctrl.get(trt, "unknown")
+        _quadrant = classify_effect_detectability(cohens_d.get(trt, np.nan), cp_map[trt])
         results.append({
             "treatment": trt, "control_type": ctrl,
             "mAP_vs_negcon": cp_map[trt], "normalized_mAP": cp_norm[trt],
@@ -1128,6 +1367,8 @@ def run_treatment_vs_control(
             "cohens_d": cohens_d.get(trt, np.nan),
             "is_negcon": ctrl in negcon_values,
             "is_poscon": bool(poscon_values) and ctrl in poscon_values,
+            "effect_detectability_quadrant": _quadrant["label"],
+            "effect_detectability_interpretation": _quadrant["interpretation"],
         })
     results_df = pd.DataFrame(results)
 
@@ -1188,11 +1429,42 @@ def plot_treatment_vs_control(tvc_result: dict, output_path: str | None = None):
     non_negcon = results[~results["is_negcon"]]
     scatter_colors = ["#75A025" if p else "#0279EE" for p in non_negcon["is_poscon"]]
     ax.scatter(non_negcon["cohens_d"], non_negcon["mAP_vs_negcon"], c=scatter_colors, s=100, alpha=0.7, edgecolors="black", linewidth=0.5)
-    for _, row in non_negcon.iterrows():
-        ax.annotate(str(row["treatment"])[:8], (row["cohens_d"], row["mAP_vs_negcon"]), fontsize=7, alpha=0.8, xytext=(5, 5), textcoords="offset points")
-    ax.set_xlabel("Cohen's d (RMS)")
-    ax.set_ylabel("mAP vs negcon")
-    ax.set_title("Cohen's d vs mAP\n(green=poscon)")
+    for _i, (_, row) in enumerate(non_negcon.iterrows()):
+        # Alternate the label above/below its point -- with several
+        # treatments clustered close together (e.g. a dose series), stacking
+        # every label at a fixed (5, 5) point offset makes them overlap.
+        _y_offset = 6 if _i % 2 == 0 else -12
+        ax.annotate(
+            str(row["treatment"]), (row["cohens_d"], row["mAP_vs_negcon"]),
+            fontsize=7, alpha=0.8, xytext=(5, _y_offset), textcoords="offset points",
+        )
+    ax.set_xlabel("Cohen's d (RMS) — effect magnitude")
+    ax.set_ylabel("mAP vs negcon — detectability")
+    ax.set_title("Effect magnitude vs. detectability\n(green=poscon)")
+
+    # Quadrant guide: Cohen's d (magnitude) x mAP (detectability) answer
+    # different questions -- see classify_effect_detectability's docstring.
+    # Thresholds match ones already used elsewhere in this pipeline (mAP=0.5
+    # is SC-22's poscon-separation threshold; d=0.5 is the fingerprint
+    # "altered feature" threshold used in NB04/NB05), not new arbitrary cutoffs.
+    _d_threshold, _map_threshold = 0.5, 0.5
+    ax.axvline(x=_d_threshold, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+    ax.axhline(y=_map_threshold, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+    _x_max = max(float(non_negcon["cohens_d"].max(skipna=True) or 0.0) * 1.15, _d_threshold * 2.0, 0.1)
+    # mAP is a similarity-derived score and can legitimately go negative, so
+    # anchor the lower bound below the data (not at 0) -- fixed at the
+    # threshold*0.05 label positions below assumed a y-axis starting near 0,
+    # which broke as soon as autoscaled data didn't start near 0 (the actual
+    # bug this fixes: labels rendered below the visible axes entirely).
+    _y_min = min(float(non_negcon["mAP_vs_negcon"].min(skipna=True) or 0.0), 0.0) - 0.05
+    _y_max = max(float(non_negcon["mAP_vs_negcon"].max(skipna=True) or 0.0) * 1.15, _map_threshold * 1.3)
+    ax.set_xlim(0, _x_max)
+    ax.set_ylim(_y_min, _y_max)
+    _quadrant_label_kwargs = {"fontsize": 7, "color": "gray", "alpha": 0.9, "ha": "left", "va": "bottom"}
+    ax.text(_x_max * 0.02, _map_threshold + (_y_max - _map_threshold) * 0.03, "subtle but\nreproducible", **_quadrant_label_kwargs)
+    ax.text(_d_threshold + (_x_max - _d_threshold) * 0.05, _map_threshold + (_y_max - _map_threshold) * 0.03, "strong, consistent", **_quadrant_label_kwargs)
+    ax.text(_x_max * 0.02, _y_min + (_map_threshold - _y_min) * 0.05, "no detectable\nphenotype", **_quadrant_label_kwargs)
+    ax.text(_d_threshold + (_x_max - _d_threshold) * 0.05, _y_min + (_map_threshold - _y_min) * 0.05, "strong but\nheterogeneous", **_quadrant_label_kwargs)
 
     ax = axes[2]
     plot_df2 = results.sort_values("normalized_mAP", ascending=True)
@@ -1202,7 +1474,7 @@ def plot_treatment_vs_control(tvc_result: dict, output_path: str | None = None):
     ax.set_yticks(y_pos2)
     ax.set_yticklabels(plot_df2["treatment"], fontsize=9)
     ax.set_xlabel("Normalized mAP")
-    ax.set_title("Phenotype Strength\n(orange = no detectable phenotype)")
+    ax.set_title("Phenotype Detectability\n(orange = no detectable phenotype)")
     ax.axvline(x=0, color="black", linewidth=0.5)
     ax.axvline(x=0.05, color="red", linestyle="--", alpha=0.3)
     ax.axvline(x=-0.05, color="red", linestyle="--", alpha=0.3)

@@ -14,10 +14,16 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 05 — Quality Metrics & Go/No-Go Dashboard
+    # 03 — Quality Metrics & Go/No-Go Dashboard
 
-    **Pipeline step:** 5 of 6
-    **Position in pipeline:** NB04 (phenotypic fingerprints) → **NB05 (quality metrics)** → NB06 (single-cell analysis)
+    **Pipeline step:** 3 of 6
+    **Position in pipeline:** NB02 (aggregate/normalize/feature-select) → **NB03 (quality metrics)** → NB04 (phenotypic profiling)
+
+    This notebook is the pipeline's QC gate, deliberately placed *before*
+    phenotypic profiling/fingerprints: it only needs NB02's output, and its
+    pass/fail criteria (PR/mAP thresholds below) are protocol-defined rather
+    than a judgment call, so it is safe to run headlessly
+    (`pixi run python3`) as well as interactively.
 
     **Input:** `per_well_features_selected.parquet` (from NB02)
     **Outputs:** `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png`,
@@ -90,7 +96,7 @@ def _():
     import pandas as pd
 
     pd.set_option("display.max_columns", 200)
-    return Path, datetime, json, np, pd, platform, replace, subprocess, timezone
+    return Path, datetime, json, pd, platform, replace, subprocess, timezone
 
 
 @app.cell
@@ -157,7 +163,6 @@ def _(Path):
         run_per_plate_qc,
         run_time_course,
         run_treatment_vs_control,
-        write_csv_protected,
         write_summary_table_protected,
     )
 
@@ -374,11 +379,11 @@ def _(
         BATCH_DROP_THRESHOLD,
         MIN_REPS_FOR_PR,
         MIN_WITHIN_PR_FOR_FLAG,
-        N_NULL_PAIRS,
         NEGCON_PR_THRESHOLD,
         NULL_PERCENTILE,
         NULL_SIZE,
         NULL_SIZE_COPAIRS_LOCAL,
+        N_NULL_PAIRS,
         POSCON_PR_THRESHOLD,
         PR_FRACTION_THRESHOLD,
         RANDOM_STATE,
@@ -434,7 +439,7 @@ def _(PROFILES_DIR, pd):
     print(f"Loading: {INPUT_PATH}")
     df = pd.read_parquet(INPUT_PATH)
     print(f"Shape: {df.shape[0]} wells × {df.shape[1]} columns")
-    return INPUT_PATH, df
+    return (df,)
 
 
 @app.cell
@@ -465,7 +470,7 @@ def _(CONFIG, df, infer_feature_cols):
 
     if df[feat_cols].isna().to_numpy().any():
         _nan_count = int(df[feat_cols].isna().sum().sum())
-        print(f"  Filling {_nan_count} NaN feature values with 0 (consistent with NB02/NB03)")
+        print(f"  Filling {_nan_count} NaN feature values with 0 (consistent with NB02)")
         df[feat_cols] = df[feat_cols].fillna(0)
 
     print(f"\n=== Experiment Summary ===")
@@ -529,7 +534,7 @@ def _(CONFIG, MIN_REPS_FOR_PR, df):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 3 — From-scratch metrics and copairs cross-validation
+    ## 3 — From-scratch vs. copairs: implementation check + sensitivity analysis
 
     `hca_pipeline.metrics_qc` provides two independent implementations of
     replicate-consistency / retrieval metrics:
@@ -537,39 +542,72 @@ def _(mo):
     1. **From-scratch** (Pearson correlation, transparent) —
        `compute_pairwise_correlations`, `null_distribution_batch_aware`,
        `percent_replicating`, `percent_matching`, `mean_average_precision`.
-    2. **`copairs`** (cosine distance, FDR-corrected p-values, configurable
-       pair definitions) — `copairs_compute_map` and friends.
+    2. **`copairs`** (FDR-corrected p-values, configurable pair definitions,
+       any `scipy`-supported distance metric) — `copairs_compute_map` and
+       friends.
 
-    `crossvalidate_scratch_vs_copairs_map` runs both on the whole dataset
-    (global mAP, `pos_sameby=[treatment_col]`) and reports the maximum
-    per-treatment disagreement. Note: `copairs` reports a **macro-average**
-    (mean of per-treatment means); the from-scratch implementation reports
-    a **micro-average** (mean of all per-profile APs) — a small, expected
-    difference between the two summary statistics, not a bug.
+    Comparing them is **two different questions**, not one:
+
+    - **Implementation check** — run copairs with `distance="correlation"`
+      (Pearson, matching the from-scratch metric exactly). Both sides then
+      rank neighbors identically, so a disagreement beyond the threshold here
+      is a real signal that one implementation has a bug. This is the only
+      one of the two comparisons with a PASS/INVESTIGATE threshold.
+    - **Sensitivity analysis** — run copairs with its default
+      `distance="cosine"`. Pearson and cosine similarity generally rank
+      neighbors differently, so disagreement here reflects that deliberate
+      methodological choice, not a bug — there is **no pass/fail threshold**
+      for this comparison; a fixed threshold would conflate "different
+      similarity metric, as designed" with "implementation error" (the
+      earlier version of this notebook did exactly that).
+
+    Both copairs runs also differ from the from-scratch result in
+    aggregation (copairs reports a **macro-average**; from-scratch reports a
+    **micro-average**) — a small, expected difference in the summary
+    statistic itself, not in the per-treatment AP values.
     """)
     return
 
 
 @app.cell
-def _(CONFIG, NULL_SIZE, RANDOM_STATE, crossvalidate_scratch_vs_copairs_map, df, feat_cols):
+def _(
+    CONFIG,
+    NULL_SIZE,
+    RANDOM_STATE,
+    crossvalidate_scratch_vs_copairs_map,
+    df,
+    feat_cols,
+):
     crossval_result = crossvalidate_scratch_vs_copairs_map(
         df, feat_cols, CONFIG.treatment_col, null_size=NULL_SIZE, seed=RANDOM_STATE,
     )
+    _impl = crossval_result["implementation_check"]
+    _sens = crossval_result["sensitivity_analysis"]
 
-    print("=== Cross-Validation: From-Scratch vs copairs (Global mAP) ===\n")
+    print("=== Implementation check: From-scratch (Pearson) vs copairs (Pearson) ===\n")
     print(f"{'Treatment':<20} {'From-scratch':>12} {'copairs':>10} {'Diff':>8}")
     print("-" * 52)
-    for _trt in sorted(crossval_result["per_treatment"].keys()):
-        _row = crossval_result["per_treatment"][_trt]
-        _flag = " ✓" if abs(_row["diff"]) <= crossval_result["agreement_threshold"] else " **"
+    for _trt in sorted(_impl["per_treatment"].keys()):
+        _row = _impl["per_treatment"][_trt]
+        _flag = " ✓" if abs(_row["diff"]) <= _impl["agreement_threshold"] else " **"
         print(f"{_trt:<20} {_row['from_scratch']:>12.3f} {_row['copairs']:>10.3f} {_row['diff']:>8.3f}{_flag}")
+    print(f"\nMax per-treatment difference: {_impl['max_abs_diff']:.4f}")
+    print(f"Implementation check: {'PASS' if _impl['agrees'] else 'INVESTIGATE'} "
+          f"(threshold: ±{_impl['agreement_threshold']})")
+    print(f"copairs (Pearson) macro-average mAP: {_impl['map_copairs_macro']:.3f}")
+    print(f"From-scratch micro-average mAP:      {crossval_result['map_from_scratch_micro']:.3f}")
 
-    print(f"\nMax per-treatment difference: {crossval_result['max_abs_diff']:.4f}")
-    print(f"Cross-validation: {'PASS' if crossval_result['agrees'] else 'INVESTIGATE'} "
-          f"(threshold: ±{crossval_result['agreement_threshold']})")
-    print(f"\ncopairs macro-average mAP:       {crossval_result['map_copairs_macro']:.3f}")
-    print(f"From-scratch micro-average mAP: {crossval_result['map_from_scratch_micro']:.3f}")
-    return (crossval_result,)
+    print("\n=== Sensitivity analysis: Pearson (from-scratch) vs cosine (copairs) ===\n")
+    print("No pass/fail threshold — disagreement here reflects the similarity-metric")
+    print("choice, not an implementation error.\n")
+    print(f"{'Treatment':<20} {'From-scratch':>12} {'copairs':>10} {'Diff':>8}")
+    print("-" * 52)
+    for _trt in sorted(_sens["per_treatment"].keys()):
+        _row = _sens["per_treatment"][_trt]
+        print(f"{_trt:<20} {_row['from_scratch']:>12.3f} {_row['copairs']:>10.3f} {_row['diff']:>8.3f}")
+    print(f"\nMax per-treatment difference: {_sens['max_abs_diff']:.4f}")
+    print(f"copairs (cosine) macro-average mAP: {_sens['map_copairs_macro']:.3f}")
+    return
 
 
 @app.cell
@@ -593,8 +631,8 @@ def _(
     NULL_PERCENTILE,
     NULL_SIZE_COPAIRS_LOCAL,
     N_NULL_PAIRS,
-    PR_FRACTION_THRESHOLD,
     POSCON_PR_THRESHOLD,
+    PR_FRACTION_THRESHOLD,
     RANDOM_STATE,
     df,
     feat_cols,
@@ -746,12 +784,36 @@ def _(mo):
     indexing), FDR-corrected p-value, and Cohen's d effect size. **SC-22**:
     poscon mAP should be high; treatments with mAP ≈ null have no
     detectable phenotype.
+
+    **Cohen's d and mAP answer different questions.** Cohen's d measures
+    *effect magnitude* (how big is the change?); mAP measures
+    *detectability* (how consistently is that change recovered across
+    replicates?). A small but highly reproducible phenotype can score
+    higher on mAP than a large but heterogeneous one — looking at either
+    metric alone can't distinguish these cases:
+
+    | | High mAP | Low mAP |
+    |---|---|---|
+    | **High Cohen's d** | Strong, consistent phenotype | Strong but heterogeneous phenotype |
+    | **Low Cohen's d** | Subtle but reproducible phenotype | No detectable (or weak) phenotype |
+
+    - **High d + High mAP** — robust phenotypic signature: large and reproducible changes.
+    - **High d + Low mAP** — large effect size but heterogeneous response; the phenotype exists but isn't consistently recovered.
+    - **Low d + High mAP** — small but highly reproducible phenotype: subtle changes, consistently detected.
+    - **Low d + Low mAP** — no detectable phenotypic signature, or changes indistinguishable from the negative control.
     """)
     return
 
 
 @app.cell
-def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_treatment_vs_control):
+def _(
+    CONFIG,
+    NULL_SIZE,
+    RANDOM_STATE,
+    df,
+    feat_cols,
+    run_treatment_vs_control,
+):
     tvc_result = run_treatment_vs_control(
         df, feat_cols, CONFIG.treatment_col, CONFIG.control_type_col,
         negcon_values=CONFIG.negcon_values, poscon_values=CONFIG.poscon_values,
@@ -768,6 +830,13 @@ def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_treatment_vs_control):
     _non_negcon = tvc_result["results"][~tvc_result["results"]["is_negcon"]]
     if len(_non_negcon) > 1:
         print(f"\nCohen's d vs mAP correlation: r = {_non_negcon['cohens_d'].corr(_non_negcon['mAP_vs_negcon']):.3f}")
+
+    print("\n--- Effect magnitude x detectability quadrant (per treatment) ---")
+    for _row in _non_negcon.itertuples(index=False):
+        print(
+            f"  {_row.treatment:<20} d={_row.cohens_d:.3f}  mAP={_row.mAP_vs_negcon:.3f}  "
+            f"→ {_row.effect_detectability_quadrant}"
+        )
     return (tvc_result,)
 
 
@@ -1019,7 +1088,7 @@ def _(
     _git_commit = _run_git_command(["rev-parse", "HEAD"])
 
     provenance = {
-        "notebook": "05_quality_metrics.py",
+        "notebook": "03_quality_metrics.py",
         "experiment_id": EXPERIMENT_ID,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_hash": (_git_commit or "unknown")[:8],
@@ -1064,12 +1133,12 @@ def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, provenance):
     _missing = [p for p in _required_outputs if not Path(p).exists()]
     if _missing:
         raise RuntimeError(
-            "NB05 integrity check failed — required output files are missing: "
+            "NB03 integrity check failed — required output files are missing: "
             + ", ".join(str(p) for p in _missing)
         )
 
     print("═" * 72)
-    print("NB05 COMPLETED")
+    print("NB03 COMPLETED")
     print("═" * 72)
     print("✓ All final integrity checks passed\n")
     print(f"  Experiment:  {EXPERIMENT_ID}")
@@ -1080,7 +1149,7 @@ def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, provenance):
     print("  Figures directory:")
     print(f"    {FIGS_DIR}")
     print(f"  Provenance: {provenance['timestamp']}")
-    print("\nNext step: NB06 — Single-cell analysis")
+    print("\nNext step: NB04 — Phenotypic profiling")
     return
 
 
@@ -1106,6 +1175,26 @@ def _(mo):
     - `results/quality_metrics/quality_metrics_report.md` — human-readable Go/No-Go report
     - `results/quality_metrics/provenance.json` — run provenance
     """)
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
     return
 
 

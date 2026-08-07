@@ -31,7 +31,7 @@ def _(mo):
     5. Selects features with pycytominer `feature_select`.
     6. Runs sanity checks SC-06 → SC-10, including a batch-effect PCA
        and within-group CV/correlation diagnostic.
-    7. Saves `cv_summary.csv` for NB03's optional LDA bias check.
+    7. Saves `cv_summary.csv` for NB04's optional LDA bias check.
 
     Each stage below checks for its own checkpoint parquet on disk and
     skips recomputation when one is already present — this replaces the
@@ -117,7 +117,12 @@ def _(Path):
         read_barcode_platemap,
         read_platemap_layout,
     )
-    from hca_pipeline.normalize import clean_features_before_normalization, normalize_per_plate_mad_robustize
+    from hca_pipeline.normalize import (
+        clean_features_before_normalization,
+        drop_extreme_magnitude_features,
+        drop_near_zero_mad_features,
+        normalize_per_plate_mad_robustize,
+    )
 
     print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
     return (
@@ -126,6 +131,8 @@ def _(Path):
         annotate_per_plate,
         clean_features_before_normalization,
         dedupe_meta,
+        drop_extreme_magnitude_features,
+        drop_near_zero_mad_features,
         enforce_pascalcase_metadata_columns,
         ensure_core_metadata,
         find_wells_missing_from_layout,
@@ -197,6 +204,14 @@ def _(loaded_config, mo):
         value=0.20, start=0.0, stop=1.0, step=0.01,
         label="Max fraction of missing values allowed per feature",
     )
+    mad_epsilon_input = mo.ui.number(
+        value=1e-3, start=0.0, stop=1.0, step=1e-4,
+        label="SC-07b: min negative-control MAD per feature (below this, drop before normalizing)",
+    )
+    max_normalized_magnitude_input = mo.ui.number(
+        value=100.0, start=1.0, stop=1_000_000.0, step=1.0,
+        label="SC-09b: max plausible |normalized feature value| (above this, drop after normalizing)",
+    )
     cv_warn_threshold_input = mo.ui.number(
         value=1.5, start=0.0, stop=100.0, label="Within-group CV warning threshold",
     )
@@ -209,6 +224,10 @@ def _(loaded_config, mo):
         label='Wells to exclude, one "Plate:Well" per line (optional)',
     )
     overwrite_input = mo.ui.checkbox(value=False, label="Overwrite existing outputs")
+    save_history_input = mo.ui.checkbox(
+        value=loaded_config.save_provenance_history,
+        label="Save timestamped provenance history",
+    )
 
     mo.vstack(
         [
@@ -216,20 +235,26 @@ def _(loaded_config, mo):
             norm_control_input,
             use_checkpoints_input,
             max_missing_fraction_input,
+            mad_epsilon_input,
+            max_normalized_magnitude_input,
             cv_warn_threshold_input,
             corr_warn_threshold_input,
             exclude_wells_input,
             overwrite_input,
+            save_history_input,
         ]
     )
     return (
         corr_warn_threshold_input,
         cv_warn_threshold_input,
         exclude_wells_input,
+        mad_epsilon_input,
+        max_normalized_magnitude_input,
         max_missing_fraction_input,
         negcon_values_input,
         norm_control_input,
         overwrite_input,
+        save_history_input,
         use_checkpoints_input,
     )
 
@@ -243,6 +268,7 @@ def _(
     norm_control_input,
     overwrite_input,
     replace,
+    save_history_input,
     validate_configuration,
 ):
     EXPERIMENT_ID = experiment_id_input.value
@@ -257,7 +283,12 @@ def _(
     NEGCON_VALUES = [v.strip() for v in negcon_values_input.value.split(",") if v.strip()]
     NORM_CONTROL = norm_control_input.value
 
-    CONFIG = replace(loaded_config, experiment_id=EXPERIMENT_ID, negcon_values=NEGCON_VALUES)
+    CONFIG = replace(
+        loaded_config,
+        experiment_id=EXPERIMENT_ID,
+        negcon_values=NEGCON_VALUES,
+        save_provenance_history=bool(save_history_input.value),
+    )
     CONFIG.save(REPO_ROOT)
 
     OVERWRITE_EXISTING_OUTPUTS = bool(overwrite_input.value)
@@ -552,6 +583,20 @@ def _(
 def _(mo):
     mo.md(r"""
     ## 6 — Clean and normalize (pycytominer `mad_robustize`)
+
+    Two guards bracket the normalization step itself:
+
+    - **SC-07b** (before): drops any feature whose negative-control MAD is
+      near-zero in any plate — `mad_robustize` dividing by a near-zero MAD
+      can blow that feature up to a numerically meaningless magnitude (seen
+      on real data: ~1e19 for a feature that should be a small integer
+      count), which then dominates any downstream correlation/distance
+      computation. This must run *before* normalization: after the blow-up,
+      the feature's variance looks artificially high, so SC-10's
+      `variance_threshold` feature-selection step cannot catch it.
+    - **SC-09b** (after): a safety net, independent of cause — drops any
+      *normalized* feature whose magnitude is still implausibly large, in
+      case something other than a near-zero MAD produces the same symptom.
     """)
     return
 
@@ -563,9 +608,13 @@ def _(
     RESOLVED_CONFIG,
     clean_features_before_normalization,
     df_aggregated,
+    drop_extreme_magnitude_features,
+    drop_near_zero_mad_features,
     enforce_pascalcase_metadata_columns,
     infer_feature_cols,
+    mad_epsilon_input,
     max_missing_fraction_input,
+    max_normalized_magnitude_input,
     normalize_per_plate_mad_robustize,
     use_checkpoints_input,
     validate_checkpoint_df,
@@ -586,6 +635,25 @@ def _(
             f"imputed {clean_summary['n_missing_before']} remaining NaN(s)."
         )
 
+        print("── SC-07b: near-zero-MAD feature guard (pre-normalization) ──")
+        df_cleaned, cleaned_feature_cols, near_zero_mad_report = drop_near_zero_mad_features(
+            df_cleaned,
+            cleaned_feature_cols,
+            plate_col=RESOLVED_CONFIG.plate_col,
+            control_col=RESOLVED_CONFIG.control_type_col,
+            negcon_values=RESOLVED_CONFIG.negcon_values,
+            norm_control=NORM_CONTROL,
+            mad_epsilon=float(mad_epsilon_input.value),
+        )
+        _near_zero_mad_features = sorted({r["feature"] for r in near_zero_mad_report})
+        if _near_zero_mad_features:
+            print(f"  ⚠️  Dropped {len(_near_zero_mad_features)} feature(s) with near-zero control MAD:")
+            for _feature in _near_zero_mad_features:
+                _plates = [r["plate"] for r in near_zero_mad_report if r["feature"] == _feature]
+                print(f"      - {_feature} (MAD ≈ 0 on: {', '.join(str(p) for p in _plates)})")
+        else:
+            print("  ✓  No near-zero-MAD features detected.")
+
         df_normalized = normalize_per_plate_mad_robustize(
             df_cleaned,
             "infer",
@@ -595,6 +663,19 @@ def _(
             norm_control=NORM_CONTROL,
         )
         df_normalized = enforce_pascalcase_metadata_columns(df_normalized)
+
+        print("── SC-09b: extreme-magnitude feature guard (post-normalization) ──")
+        _post_norm_feature_cols = infer_feature_cols(df_normalized)
+        df_normalized, _remaining_feature_cols, extreme_magnitude_report = drop_extreme_magnitude_features(
+            df_normalized, _post_norm_feature_cols, max_abs_value=float(max_normalized_magnitude_input.value),
+        )
+        if extreme_magnitude_report:
+            print(f"  ⚠️  Dropped {len(extreme_magnitude_report)} feature(s) with implausible normalized magnitude:")
+            for _feature, _max_abs in extreme_magnitude_report.items():
+                print(f"      - {_feature} (max|value| = {_max_abs:.3e})")
+        else:
+            print("  ✓  No implausible post-normalization magnitudes detected.")
+
         df_normalized.to_parquet(PW_NORMALIZED_PARQUET, index=False)
         print(f"✓ Normalized and cached: {PW_NORMALIZED_PARQUET}  →  {df_normalized.shape}")
     return (df_normalized,)
@@ -679,6 +760,7 @@ def _(
         print(f"  Silhouette by plate after normalization: {plate_silhouette:.3f} (near 0 = better mixing)")
     else:
         print("  Silhouette skipped: single plate or too few samples.")
+    fig_sc08
     return (feat_cols_norm,)
 
 
@@ -772,6 +854,7 @@ def _(
     fig_sc09.savefig(FIGS_DIR / "sc09_within_group_variability.png", dpi=150, bbox_inches="tight")
     plt.close(fig_sc09)
     print(f"✓ Figure saved: {FIGS_DIR / 'sc09_within_group_variability.png'}")
+    fig_sc09
     return
 
 
@@ -861,7 +944,7 @@ def _(df_feature_selected, infer_feature_cols):
     print("Treatment distribution:")
     print(df_feature_selected["Metadata_Treatment"].value_counts().to_string())
     print()
-    print("Next step: NB03 — Phenotypic Profiling")
+    print("Next step: NB03 — Quality Metrics (Go/No-Go gate)")
     return (feat_cols_final,)
 
 
@@ -929,6 +1012,17 @@ def _(
     with provenance_nb02_path.open("w", encoding="utf-8") as _f:
         json.dump(provenance_nb02, _f, indent=2, ensure_ascii=False)
     print(f"✓ Provenance saved: {provenance_nb02_path}")
+
+    if CONFIG.save_provenance_history:
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _history_path = RESULTS_DIR / f"provenance_nb02_{_timestamp}.json"
+        if _history_path.exists():
+            raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
+        with _history_path.open("w", encoding="utf-8") as _f:
+            json.dump(provenance_nb02, _f, indent=2, ensure_ascii=False)
+        print(f"✓ Historical record: {_history_path}")
+    else:
+        print("  Historical record: disabled")
     return
 
 

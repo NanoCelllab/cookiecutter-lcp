@@ -1,4 +1,4 @@
-"""Generic plotting helpers shared across LCP analysis notebooks.
+"""Generic plotting helpers shared across HCA analysis notebooks.
 
 Ports the scatter-panel helper from
 ``03_phenotypic_profiling_parallel_spaces.ipynb`` and the fingerprint-heatmap
@@ -75,10 +75,14 @@ def plot_fingerprint_heatmap(
     diverging: bool = False,
     fixed_range: tuple[float, float] | None = None,
     dpi: int = 180,
-) -> None:
-    """Render and save a category x condition fingerprint heatmap."""
+) -> plt.Figure | None:
+    """Render and save a category x condition fingerprint heatmap.
+
+    Returns the saved (closed) ``Figure`` so callers can display it inline
+    in a notebook, or ``None`` if ``matrix`` is empty and nothing was drawn.
+    """
     if matrix.empty:
-        return
+        return None
 
     n_rows, n_columns = matrix.shape
 
@@ -120,6 +124,7 @@ def plot_fingerprint_heatmap(
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +232,14 @@ def plot_condition_radar_grid(
     output_path: Path,
     max_columns: int = 4,
     dpi: int = 180,
-) -> None:
-    """Create one small radar per experimental condition (matrix column)."""
+) -> plt.Figure | None:
+    """Create one small radar per experimental condition (matrix column).
+
+    Returns the saved (closed) ``Figure`` so callers can display it inline
+    in a notebook, or ``None`` if ``matrix`` is empty and nothing was drawn.
+    """
     if matrix.empty:
-        return
+        return None
 
     categories = matrix.index.tolist()
     conditions = matrix.columns.tolist()
@@ -266,6 +275,7 @@ def plot_condition_radar_grid(
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+    return fig
 
 
 def plot_dose_overlay_radars(
@@ -280,15 +290,18 @@ def plot_dose_overlay_radars(
     concentration_label_column: str = "Metadata_Concentration_Label",
     max_columns: int = 4,
     dpi: int = 180,
-) -> None:
+) -> plt.Figure | None:
     """Create one radar per treatment with all its concentrations overlaid.
 
     ``condition_table`` must have one row per condition with, at minimum,
     ``condition_column``, ``treatment_column``, ``concentration_column``, and
     ``concentration_label_column`` (matching ``stats.calculate_*_effects``).
+
+    Returns the saved (closed) ``Figure`` so callers can display it inline
+    in a notebook, or ``None`` if ``matrix`` is empty and nothing was drawn.
     """
     if matrix.empty:
-        return
+        return None
 
     categories = matrix.index.tolist()
 
@@ -348,3 +361,4 @@ def plot_dose_overlay_radars(
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+    return fig

@@ -33,7 +33,7 @@ def _(mo):
     4. PCA and (if installed) UMAP on the sampled single-cell data.
     5. HDBSCAN and KMeans clustering on the top PCs.
     6. LightGBM classifier (treatment label) with `GroupShuffleSplit` by well.
-    7. SHAP feature importance + cross-check with NB03 LDA loadings (SC-17).
+    7. SHAP feature importance + cross-check with NB04 LDA loadings (SC-17).
 
     ### Fixes relative to the original notebook
 
@@ -215,6 +215,7 @@ def _(mo):
     hdbscan_min_samples_input = mo.ui.number(value=5, start=1, stop=200, label="HDBSCAN min_samples")
     kmeans_k_max_input = mo.ui.number(value=15, start=3, stop=50, label="KMeans: max k to try")
     overwrite_input = mo.ui.checkbox(value=False, label="Overwrite existing outputs")
+    save_history_input = mo.ui.checkbox(value=False, label="Save timestamped provenance history")
 
     mo.vstack(
         [
@@ -226,6 +227,7 @@ def _(mo):
             hdbscan_min_samples_input,
             kmeans_k_max_input,
             overwrite_input,
+            save_history_input,
         ]
     )
     return (
@@ -237,6 +239,7 @@ def _(mo):
         n_pca_components_input,
         nan_threshold_input,
         overwrite_input,
+        save_history_input,
     )
 
 
@@ -302,14 +305,14 @@ def _(CONFIG, GO_NOGO_REPORT, INPUT_PARQUET, pd):
     RESOLVED_CONFIG = CONFIG.resolve_columns(df_sc)
 
     if GO_NOGO_REPORT.exists():
-        print("── NB05 Go/No-Go quality gate ──")
+        print("── NB03 Go/No-Go quality gate ──")
         report_text = GO_NOGO_REPORT.read_text()
         if "NO-GO" in report_text.upper():
-            print("  ⚠️  NB05 returned NO-GO. Single-cell analysis may be unreliable.")
+            print("  ⚠️  NB03 returned NO-GO. Single-cell analysis may be unreliable.")
         else:
-            print("  ✓  NB05 quality gate passed (or not NO-GO).")
+            print("  ✓  NB03 quality gate passed (or not NO-GO).")
     else:
-        print("  ℹ️  NB05 Go/No-Go report not found yet.")
+        print("  ℹ️  NB03 Go/No-Go report not found yet.")
 
     feat_cols_raw = [c for c in df_sc.columns if c.startswith(("Cells_", "Cytoplasm_", "Nuclei_", "Vesicles_")) and not c.startswith("Metadata_")]
     print(f"  Shape: {df_sc.shape[0]:,} cells × {df_sc.shape[1]} cols")
@@ -352,6 +355,7 @@ def _(FIGS_DIR, RESOLVED_CONFIG, df_sc, plt, sns):
     fig_sc14.savefig(FIGS_DIR / "sc14_cell_count_violin.png", dpi=150, bbox_inches="tight")
     plt.close(fig_sc14)
     print(f"  ✓  Saved: sc14_cell_count_violin.png (median cells/well: {counts_per_well['n_cells'].median():.0f})")
+    fig_sc14
     return
 
 
@@ -475,6 +479,7 @@ def _(FIGS_DIR, PCA, X_sampled, n_pca_components_input, np, plt):
     fig_scree.savefig(FIGS_DIR / "sc_pca_scree.png", dpi=150, bbox_inches="tight")
     plt.close(fig_scree)
     print(f"  PC1: {_evr[0]:.1%}  |  PC2: {_evr[1]:.1%}  |  Top-{_n_show}: {_evr.sum():.1%}")
+    fig_scree
     return X_sc_pca, pca_sc
 
 
@@ -500,6 +505,7 @@ def _(FIGS_DIR, RESOLVED_CONFIG, X_sc_pca, df_sampled, np, pca_sc, plt, sns):
     fig_pca_scatter.savefig(FIGS_DIR / "sc_pca_scatter.png", dpi=150, bbox_inches="tight")
     plt.close(fig_pca_scatter)
     print("✓ Saved: sc_pca_scatter.png")
+    fig_pca_scatter
     return
 
 
@@ -562,6 +568,10 @@ def _(FIGS_DIR, RESOLVED_CONFIG, UMAP_OK, plt, sns, umap_df):
         fig_umap.savefig(FIGS_DIR / "sc_umap_overview.png", dpi=200, bbox_inches="tight")
         plt.close(fig_umap)
         print("✓ Saved: sc_umap_overview.png")
+        _display = fig_umap
+    else:
+        _display = None
+    _display
     return
 
 
@@ -632,6 +642,10 @@ def _(FIGS_DIR, HDBSCAN_OK, plt, sns, umap_df_clustered):
         fig_hdb.savefig(FIGS_DIR / "sc_hdbscan_umap.png", dpi=150, bbox_inches="tight")
         plt.close(fig_hdb)
         print("✓ Saved: sc_hdbscan_umap.png")
+        _display = fig_hdb
+    else:
+        _display = None
+    _display
     return
 
 
@@ -670,6 +684,7 @@ def _(
     plt.close(fig_elbow)
     best_k_sc = list(k_range)[int(np.argmax(silhouettes_sc))]
     print(f"  Best silhouette at k={best_k_sc}: {max(silhouettes_sc):.3f}")
+    fig_elbow
     return (best_k_sc,)
 
 
@@ -726,6 +741,10 @@ def _(
         fig_kmeans_umap.savefig(FIGS_DIR / "sc_umap_clusters.png", dpi=150, bbox_inches="tight")
         plt.close(fig_kmeans_umap)
         print("  ✓  Saved: sc_umap_clusters.png")
+        _display = fig_kmeans_umap
+    else:
+        _display = None
+    _display
     return K_SC, df_clustered
 
 
@@ -787,6 +806,10 @@ def _(FIGS_DIR, lgbm_result, plt):
         fig_shap.savefig(FIGS_DIR / "shap_importance.png", dpi=150, bbox_inches="tight")
         plt.close(fig_shap)
         print("  ✓  Saved: shap_importance.png")
+        _display = fig_shap
+    else:
+        _display = None
+    _display
     return
 
 
@@ -806,7 +829,8 @@ def _(mo):
 def _(FIGS_DIR, LDA_LOADINGS_CSV, lgbm_result, pd, plt):
     print("── SC-17: SHAP vs. LDA loadings cross-check ──")
     if "mean_abs_shap" not in lgbm_result or not LDA_LOADINGS_CSV.exists():
-        print("  ⚠️  SHAP summary or LDA loadings not available. Run NB03 and Section 7 above first.")
+        print("  ⚠️  SHAP summary or LDA loadings not available. Run NB04 and Section 7 above first.")
+        _display = None
     else:
         lda_df_sc = pd.read_csv(LDA_LOADINGS_CSV, index_col=0)
         top_shap = set(lgbm_result["mean_abs_shap"].nlargest(20).index)
@@ -831,6 +855,8 @@ def _(FIGS_DIR, LDA_LOADINGS_CSV, lgbm_result, pd, plt):
         fig_sc17.savefig(FIGS_DIR / "sc17_shap_lda_overlap.png", dpi=150, bbox_inches="tight")
         plt.close(fig_sc17)
         print("  ✓  Saved: sc17_shap_lda_overlap.png")
+        _display = fig_sc17
+    _display
     return
 
 
@@ -855,6 +881,7 @@ def _(
     feature_cols_model,
     json,
     platform,
+    save_history_input,
     subprocess,
 ):
     from datetime import datetime, timezone
@@ -897,6 +924,17 @@ def _(
     with provenance_nb06_path.open("w", encoding="utf-8") as _f:
         json.dump(provenance_nb06, _f, indent=2, ensure_ascii=False)
     print(f"✓ Provenance saved: {provenance_nb06_path}")
+
+    if save_history_input.value:
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _history_path = RESULTS_DIR / f"provenance_nb06_{_timestamp}.json"
+        if _history_path.exists():
+            raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
+        with _history_path.open("w", encoding="utf-8") as _f:
+            json.dump(provenance_nb06, _f, indent=2, ensure_ascii=False)
+        print(f"✓ Historical record: {_history_path}")
+    else:
+        print("  Historical record: disabled")
     return
 
 
@@ -907,6 +945,11 @@ def _():
     import subprocess
 
     return json, platform, subprocess
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

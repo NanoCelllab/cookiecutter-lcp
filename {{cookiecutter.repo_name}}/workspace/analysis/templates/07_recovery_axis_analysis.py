@@ -111,7 +111,6 @@ def _():
         }
     )
     pd.set_option("display.max_columns", 80)
-
     return (
         GroupKFold,
         LogisticRegression,
@@ -355,7 +354,7 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     print(f"  Input parquet:      {INPUT_PARQUET}")
     print(f"  Results directory:  {RESULTS_DIR}")
     print(f"  Figures directory:  {FIGS_DIR}")
-    return CACHE_DIR, FIGS_DIR, INPUT_PARQUET, RESULTS_DIR
+    return FIGS_DIR, INPUT_PARQUET, RESULTS_DIR
 
 
 @app.cell
@@ -435,7 +434,13 @@ def _(TREATMENT_COL, df_sc, mo):
 
 
 @app.cell
-def _(TREATMENT_COL, baseline_label_input, df_sc, mo, proliferative_label_input):
+def _(
+    TREATMENT_COL,
+    baseline_label_input,
+    df_sc,
+    mo,
+    proliferative_label_input,
+):
     _treatment_counts = df_sc[TREATMENT_COL].astype(str).value_counts()
     _baseline_value = baseline_label_input.value
     _proliferative_value = proliferative_label_input.value
@@ -495,7 +500,14 @@ def _(mo):
 
 
 @app.cell
-def _(BASELINE_LABEL, NAN_THRESHOLD, PROLIFERATIVE_LABEL, clean_features_before_normalization, df_sc, infer_feature_cols):
+def _(
+    BASELINE_LABEL,
+    NAN_THRESHOLD,
+    PROLIFERATIVE_LABEL,
+    clean_features_before_normalization,
+    df_sc,
+    infer_feature_cols,
+):
     print(f"Curating single-cell features for the recovery axis between {BASELINE_LABEL!r} and {PROLIFERATIVE_LABEL!r}")
 
     # Non-phenotypic identifier-like columns (object linkage IDs, not
@@ -655,7 +667,14 @@ def _(
 
 
 @app.cell
-def _(BASELINE_LABEL, PROLIFERATIVE_LABEL, TREATMENT_COL, X_recovery, np, recovery_meta):
+def _(
+    BASELINE_LABEL,
+    PROLIFERATIVE_LABEL,
+    TREATMENT_COL,
+    X_recovery,
+    np,
+    recovery_meta,
+):
     baseline_mask = recovery_meta[TREATMENT_COL].eq(BASELINE_LABEL).to_numpy()
     proliferative_mask = recovery_meta[TREATMENT_COL].eq(PROLIFERATIVE_LABEL).to_numpy()
     baseline_centroid = X_recovery[baseline_mask].mean(axis=0)
@@ -689,7 +708,17 @@ def _(BASELINE_LABEL, PROLIFERATIVE_LABEL, TREATMENT_COL, X_recovery, np, recove
 
 
 @app.cell
-def _(BASELINE_LABEL, FIGS_DIR, PLATE_COL, PROLIFERATIVE_LABEL, TREATMENT_COL, WELL_COL, cell_recovery_df, np, plt):
+def _(
+    BASELINE_LABEL,
+    FIGS_DIR,
+    PLATE_COL,
+    PROLIFERATIVE_LABEL,
+    TREATMENT_COL,
+    WELL_COL,
+    cell_recovery_df,
+    np,
+    plt,
+):
     _reference_geometric_wells = (
         cell_recovery_df.loc[cell_recovery_df[TREATMENT_COL].isin([BASELINE_LABEL, PROLIFERATIVE_LABEL])]
         .groupby([PLATE_COL, WELL_COL, TREATMENT_COL], observed=True)
@@ -722,6 +751,7 @@ def _(BASELINE_LABEL, FIGS_DIR, PLATE_COL, PROLIFERATIVE_LABEL, TREATMENT_COL, W
     _fig.savefig(FIGS_DIR / "reference_geometric_validation.png", dpi=180, bbox_inches="tight")
     plt.close(_fig)
     print(f"✓ Saved: reference_geometric_validation.png ({len(_reference_geometric_wells)} reference wells)")
+    _fig
     return
 
 
@@ -740,7 +770,16 @@ def _(mo):
 
 
 @app.cell
-def _(BASELINE_LABEL, PLATE_COL, PROLIFERATIVE_LABEL, TREATMENT_COL, WELL_COL, X_recovery, pd, recovery_meta):
+def _(
+    BASELINE_LABEL,
+    PLATE_COL,
+    PROLIFERATIVE_LABEL,
+    TREATMENT_COL,
+    WELL_COL,
+    X_recovery,
+    pd,
+    recovery_meta,
+):
     reference_mask = recovery_meta[TREATMENT_COL].isin([BASELINE_LABEL, PROLIFERATIVE_LABEL]).to_numpy()
     X_reference = X_recovery[reference_mask]
     reference_meta = recovery_meta.loc[reference_mask].reset_index(drop=True)
@@ -857,6 +896,7 @@ def _(
     _fig.savefig(FIGS_DIR / "reference_classifier_validation.png", dpi=180, bbox_inches="tight")
     plt.close(_fig)
     print(f"✓ Saved: reference_classifier_validation.png ({len(reference_cv_wells)} reference wells)")
+    _fig
     return
 
 
@@ -881,8 +921,8 @@ def _(
     RECOVERY_SCORE_THRESHOLD,
     RESULTS_DIR,
     StandardScaler,
-    X_reference,
     X_recovery,
+    X_reference,
     cell_recovery_df,
     make_pipeline,
     write_parquet_protected,
@@ -919,7 +959,16 @@ def _(mo):
 
 
 @app.cell
-def _(CONC_COL, CONFIG, PLATE_COL, RESULTS_DIR, TREATMENT_COL, WELL_COL, cell_recovery_df, write_csv_protected):
+def _(
+    CONC_COL,
+    CONFIG,
+    PLATE_COL,
+    RESULTS_DIR,
+    TREATMENT_COL,
+    WELL_COL,
+    cell_recovery_df,
+    write_csv_protected,
+):
     _group_columns = [PLATE_COL, WELL_COL, TREATMENT_COL]
     if CONC_COL and CONC_COL in cell_recovery_df.columns:
         _group_columns.append(CONC_COL)
@@ -951,7 +1000,15 @@ def _(CONC_COL, CONFIG, PLATE_COL, RESULTS_DIR, TREATMENT_COL, WELL_COL, cell_re
 
 
 @app.cell
-def _(CONC_COL, CONFIG, RESULTS_DIR, TREATMENT_COL, WELL_COL, well_recovery_df, write_csv_protected):
+def _(
+    CONC_COL,
+    CONFIG,
+    RESULTS_DIR,
+    TREATMENT_COL,
+    WELL_COL,
+    well_recovery_df,
+    write_csv_protected,
+):
     _condition_columns = [TREATMENT_COL] + ([CONC_COL] if CONC_COL and CONC_COL in well_recovery_df.columns else [])
     condition_recovery_df = (
         well_recovery_df.groupby(_condition_columns, observed=True)
@@ -1001,11 +1058,19 @@ def _(FIGS_DIR, TREATMENT_COL, plt, well_recovery_df):
     _fig.savefig(FIGS_DIR / "recovery_parallel_vs_orthogonal.png", dpi=180, bbox_inches="tight")
     plt.close(_fig)
     print("✓ Saved: recovery_parallel_vs_orthogonal.png")
+    _fig
     return
 
 
 @app.cell
-def _(FIGS_DIR, PROLIFERATIVE_PROBABILITY_THRESHOLD, TREATMENT_COL, np, plt, well_recovery_df):
+def _(
+    FIGS_DIR,
+    PROLIFERATIVE_PROBABILITY_THRESHOLD,
+    TREATMENT_COL,
+    np,
+    plt,
+    well_recovery_df,
+):
     _order = well_recovery_df[TREATMENT_COL].astype(str).drop_duplicates().tolist()
     _fig, _axes = plt.subplots(1, 3, figsize=(18, 5))
     _metrics = [
@@ -1030,11 +1095,21 @@ def _(FIGS_DIR, PROLIFERATIVE_PROBABILITY_THRESHOLD, TREATMENT_COL, np, plt, wel
     _fig.savefig(FIGS_DIR / "well_level_recovery_overview.png", dpi=180, bbox_inches="tight")
     plt.close(_fig)
     print("✓ Saved: well_level_recovery_overview.png")
+    _fig
     return
 
 
 @app.cell
-def _(BASELINE_LABEL, CONC_COL, FIGS_DIR, PROLIFERATIVE_LABEL, TREATMENT_COL, pd, plt, well_recovery_df):
+def _(
+    BASELINE_LABEL,
+    CONC_COL,
+    FIGS_DIR,
+    PROLIFERATIVE_LABEL,
+    TREATMENT_COL,
+    pd,
+    plt,
+    well_recovery_df,
+):
     if CONC_COL and CONC_COL in well_recovery_df.columns:
         _dose_df = well_recovery_df.loc[~well_recovery_df[TREATMENT_COL].isin([BASELINE_LABEL, PROLIFERATIVE_LABEL])].copy()
         _dose_df[CONC_COL] = pd.to_numeric(_dose_df[CONC_COL], errors="coerce")
@@ -1068,8 +1143,11 @@ def _(BASELINE_LABEL, CONC_COL, FIGS_DIR, PROLIFERATIVE_LABEL, TREATMENT_COL, pd
         _fig.savefig(FIGS_DIR / "dose_response_recovery.png", dpi=180, bbox_inches="tight")
         plt.close(_fig)
         print("✓ Saved: dose_response_recovery.png")
+        _display = _fig
     else:
         print("Concentration metadata unavailable; dose-response plots skipped.")
+        _display = None
+    _display
     return
 
 
@@ -1115,6 +1193,7 @@ def _(FIGS_DIR, TREATMENT_COL, cell_recovery_df, np, plt):
     _fig.savefig(FIGS_DIR / "single_cell_recovery_distributions.png", dpi=180, bbox_inches="tight")
     plt.close(_fig)
     print("✓ Saved: single_cell_recovery_distributions.png")
+    _fig
     return
 
 
@@ -1154,7 +1233,7 @@ def _(mo):
     weights describe the baseline-to-proliferative reference transition and
     are summarized by feature family / compartment / channel using the
     shared `hca_pipeline.taxonomy` classifier (the same one
-    `04_phenotypic_fingerprints.py` uses), rather than a notebook-local
+    `05_phenotypic_fingerprints.py` uses), rather than a notebook-local
     reimplementation.
     """)
     return
@@ -1458,8 +1537,8 @@ def _(
     BASELINE_LABEL,
     EXPERIMENT_ID,
     FIGS_DIR,
-    Path,
     PROLIFERATIVE_LABEL,
+    Path,
     RESULTS_DIR,
     cell_recovery_df,
     condition_recovery_df,
@@ -1503,6 +1582,11 @@ def _(
     print(f"    {FIGS_DIR}")
     print("\n  Provenance:")
     print(f"    {provenance_latest_path}")
+    return
+
+
+@app.cell
+def _():
     return
 
 
