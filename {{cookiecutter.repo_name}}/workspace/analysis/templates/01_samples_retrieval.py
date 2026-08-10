@@ -1481,5 +1481,52 @@ def _(
     return
 
 
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Export a PDF report
+
+    Optional. Renders this notebook — markdown, code, and outputs — into a
+    paginated PDF and saves it under `reports/` for this experiment,
+    alongside `results/` and `figures/`. Rendering re-runs the notebook
+    headlessly in a fresh process, so the report reflects whatever is
+    currently saved in `experiment_config.json` (written by the
+    configuration cell above each time this notebook runs), not any
+    unsaved changes to the widgets above.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    export_report_button = mo.ui.run_button(
+        label="Export this notebook as a PDF report", kind="success"
+    )
+    export_report_button
+    return (export_report_button,)
+
+
+@app.cell
+def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
+    mo.stop(not export_report_button.value)
+
+    from hca_pipeline.report_export import export_notebook_pdf
+
+    _notebook_file = Path(__file__).resolve()
+    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
+    _reports_dir.mkdir(parents=True, exist_ok=True)
+    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
+
+    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
+        export_notebook_pdf(
+            _notebook_file,
+            _report_path,
+            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
+        )
+
+    mo.md(f"✓ Report saved: `{_report_path}`")
+    return
+
+
 if __name__ == "__main__":
     app.run()
