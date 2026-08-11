@@ -1586,11 +1586,6 @@ def _(
 
 
 @app.cell
-def _():
-    return
-
-
-@app.cell
 def _(mo):
     mo.md(r"""
     ## Export a PDF report

@@ -44,6 +44,23 @@ def parquet_structure(path: Path) -> tuple[int, list[str]]:
     )
 
 
+def checkpoint_matches_plate_scope(
+    path: Path,
+    included_plates,
+    *,
+    plate_col: str = "Metadata_Plate",
+) -> bool:
+    """Return whether a Parquet checkpoint contains exactly the requested plates."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        observed = set(pd.read_parquet(path, columns=[plate_col])[plate_col].dropna().astype(str))
+    except (KeyError, ValueError):
+        return False
+    return observed == {str(plate) for plate in included_plates}
+
+
 def write_parquet_protected(df: pd.DataFrame, path: Path, *, overwrite: bool) -> str:
     """Write *df* to *path* as Parquet unless an incompatible file already exists.
 

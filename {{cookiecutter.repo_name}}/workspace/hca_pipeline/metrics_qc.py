@@ -49,6 +49,7 @@ Two dead-code reconciliations relative to the source notebook:
 
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -404,6 +405,7 @@ def copairs_compute_map(
     map_scores = copairs_map.mean_average_precision(
         ap_scores=ap_scores, sameby=pos_sameby,
         null_size=null_size, threshold=0.05, seed=seed,
+        cache_dir=os.environ.get("COPAIRS_CACHE_DIR"),
         progress_bar=False,
     )
     return copairs_map.apply_fdr_correction(map_scores)
@@ -460,6 +462,7 @@ def copairs_treatment_vs_control_map(
     map_scores = copairs_map.mean_average_precision(
         ap_scores=ap_scores, sameby=[treatment_col],
         null_size=null_size, threshold=0.05, seed=seed,
+        cache_dir=os.environ.get("COPAIRS_CACHE_DIR"),
         progress_bar=False,
     )
     map_scores = copairs_map.apply_fdr_correction(map_scores)
@@ -522,6 +525,7 @@ def copairs_dose_response_map(
     map_scores = copairs_map.mean_average_precision(
         ap_scores=ap_scores, sameby=["Metadata_Treatment_Dose"],
         null_size=null_size, threshold=0.05, seed=seed,
+        cache_dir=os.environ.get("COPAIRS_CACHE_DIR"),
         progress_bar=False,
     )
     map_scores = copairs_map.apply_fdr_correction(map_scores)

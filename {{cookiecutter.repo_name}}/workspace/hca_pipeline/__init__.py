@@ -14,6 +14,7 @@ from .config import (
 )
 from .feature_select import infer_feature_cols, select_features
 from .io import (
+    checkpoint_matches_plate_scope,
     find_repo_root,
     parquet_structure,
     resolve_resume_stage,
@@ -23,6 +24,8 @@ from .io import (
     write_summary_table_protected,
 )
 from .metadata import (
+    CELL_COUNT_METADATA_COLUMN,
+    add_cell_count_metadata,
     annotate_per_plate,
     dedupe_meta,
     ensure_core_metadata,
@@ -67,6 +70,7 @@ __all__ = [
     "validate_configuration",
     "infer_feature_cols",
     "select_features",
+    "checkpoint_matches_plate_scope",
     "find_repo_root",
     "parquet_structure",
     "resolve_resume_stage",
@@ -74,6 +78,8 @@ __all__ = [
     "write_csv_protected",
     "write_parquet_protected",
     "write_summary_table_protected",
+    "CELL_COUNT_METADATA_COLUMN",
+    "add_cell_count_metadata",
     "annotate_per_plate",
     "dedupe_meta",
     "ensure_core_metadata",

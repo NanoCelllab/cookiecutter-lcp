@@ -83,6 +83,7 @@ def _():
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
+    from matplotlib.patches import Patch
     from sklearn.decomposition import PCA
 
     try:
@@ -107,6 +108,7 @@ def _():
     UMAP_OK = _UMAP_OK
     return (
         PCA,
+        Patch,
         Path,
         UMAP,
         UMAP_OK,
@@ -159,6 +161,8 @@ def _(Path):
     from hca_pipeline.config import ExperimentConfig
     from hca_pipeline.feature_select import infer_feature_cols
     from hca_pipeline.io import write_csv_protected
+    from hca_pipeline.metadata import CELL_COUNT_METADATA_COLUMN
+    from hca_pipeline.metrics_qc import copairs_compute_map
     from hca_pipeline.modelling import (
         _qc_record as qc_record,  # leading-underscore rename: see NB conversion notes
         absolute_change,
@@ -172,6 +176,8 @@ def _(Path):
 
     print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
     return (
+        CELL_COUNT_METADATA_COLUMN,
+        copairs_compute_map,
         ExperimentConfig,
         REPO_ROOT,
         absolute_change,
@@ -783,6 +789,13 @@ def _(mo):
     ## Section 2 — PCA (unsupervised baseline)
 
     **SC-11:** PCA coloured by plate should show no strong plate clustering after NB02 normalization.
+
+    The fourth panel colours each well by its number of segmented cells. A
+    PCA outlier that is also an extreme low/high-cell-count well may reflect
+    sparse sampling, confluence, segmentation failure, or toxicity rather
+    than a stable biological phenotype. Cell counts are reconstructed from
+    the annotated single-cell checkpoint and displayed on a logarithmic
+    colour scale so both small and very large wells remain distinguishable.
     """)
     return
 
@@ -812,8 +825,27 @@ def _(FIGS_DIR, N_PCA_COMPONENTS, PCA, RANDOM_STATE, X, np, plt):
 
 
 @app.cell
-def _(CONFIG, FIGS_DIR, X_pca, df, pca_full, plt, scatter_panel):
-    _fig, _axes = plt.subplots(1, 3, figsize=(18, 5))
+def _(CELL_COUNT_METADATA_COLUMN, df, pd):
+    if CELL_COUNT_METADATA_COLUMN not in df.columns:
+        raise ValueError(
+            f"Required metadata {CELL_COUNT_METADATA_COLUMN!r} is missing from the final profile. "
+            "Re-run NB01 and NB02; cell count must be preserved as metadata throughout the pipeline."
+        )
+    well_cell_counts = pd.to_numeric(df[CELL_COUNT_METADATA_COLUMN], errors="raise").astype(int).to_numpy()
+    print(
+        "Cell count per well: "
+        f"min={well_cell_counts.min():,}, median={int(pd.Series(well_cell_counts).median()):,}, "
+        f"max={well_cell_counts.max():,}"
+    )
+    return (well_cell_counts,)
+
+
+@app.cell
+def _(CONFIG, FIGS_DIR, X_pca, df, np, pca_full, plt, scatter_panel, well_cell_counts):
+    from matplotlib.colors import LogNorm as _LogNorm
+
+    _fig, _axes_grid = plt.subplots(2, 2, figsize=(14, 11))
+    _axes = _axes_grid.ravel()
     scatter_panel(_axes[0], X_pca[:, 0], X_pca[:, 1], df[CONFIG.treatment_col].tolist(), "Treatment")
     scatter_panel(
         _axes[1], X_pca[:, 0], X_pca[:, 1], df[CONFIG.plate_col].tolist(),
@@ -824,6 +856,25 @@ def _(CONFIG, FIGS_DIR, X_pca, df, pca_full, plt, scatter_panel):
             _axes[2], X_pca[:, 0], X_pca[:, 1], df[CONFIG.concentration_col].tolist(),
             "Concentration", continuous=True,
         )
+    else:
+        _axes[2].text(0.5, 0.5, "No concentration axis configured", ha="center", va="center")
+        _axes[2].set_title("Concentration")
+
+    _positive_counts = np.clip(np.asarray(well_cell_counts, dtype=float), 1, None)
+    _cell_count_scatter = _axes[3].scatter(
+        X_pca[:, 0],
+        X_pca[:, 1],
+        c=_positive_counts,
+        cmap="viridis",
+        norm=_LogNorm(vmin=_positive_counts.min(), vmax=_positive_counts.max()),
+        s=60,
+        alpha=0.85,
+        edgecolors="k",
+        linewidths=0.4,
+    )
+    _fig.colorbar(_cell_count_scatter, ax=_axes[3], label="Number of cells per well")
+    _axes[3].set_title("Cell count (potential confounder; log colour scale)")
+
     for _ax in _axes:
         _ax.set_xlabel(f"PC1 ({pca_full.explained_variance_ratio_[0]:.1%})")
         _ax.set_ylabel(f"PC2 ({pca_full.explained_variance_ratio_[1]:.1%})")
@@ -835,6 +886,243 @@ def _(CONFIG, FIGS_DIR, X_pca, df, pca_full, plt, scatter_panel):
     print("  SC-11: Check that the middle panel shows no plate-specific clusters.")
     _fig
     return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 2b — Exploratory cell-count regression
+
+    This is a deliberately simplified, **diagnostic-only** comparison. For
+    each standardized morphology feature, it estimates a linear relationship
+    with `log10(cell count)` and subtracts the fitted count-dependent shift.
+    The original profiles and every downstream analysis remain unchanged.
+
+    **Why control-based is the default:** fitting slopes only in negative
+    controls reduces the risk of learning and removing treatment-driven
+    viability/proliferation biology. It still assumes the technical slope is
+    transportable from controls to treated wells. Global regression is shown
+    only as an exploratory option and can remove real treatment signal when
+    treatment affects cell count.
+
+    This compact comparison is not evidence that correction should be adopted.
+    The deferred full implementation requires the confounder-detection gate,
+    within-control tests, PERMANOVA, cross-validation, leakage checks and
+    biological-signal preservation described in
+    `workspace/FUTURE_CELL_COUNT_CONFOUNDER_QC.md`.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    cell_count_regression_mode_input = mo.ui.dropdown(
+        options=["control_based", "global"],
+        value="control_based",
+        label="Fit cell-count slopes using (control_based is recommended)",
+    )
+    cell_count_regression_mode_input
+    return (cell_count_regression_mode_input,)
+
+
+@app.cell
+def _(
+    X,
+    cell_count_regression_mode_input,
+    negcon_mask,
+    np,
+    well_cell_counts,
+):
+    _log_count = np.log10(np.clip(np.asarray(well_cell_counts, dtype=float), 1, None))
+    _fit_mask = (
+        np.asarray(negcon_mask, dtype=bool)
+        if cell_count_regression_mode_input.value == "control_based"
+        else np.ones(len(_log_count), dtype=bool)
+    )
+    if int(_fit_mask.sum()) < 3:
+        raise ValueError("At least three fitting wells are required for exploratory cell-count regression.")
+
+    _fit_log = _log_count[_fit_mask]
+    _fit_X = X[_fit_mask]
+    _centered_fit_log = _fit_log - _fit_log.mean()
+    _denominator = float(np.dot(_centered_fit_log, _centered_fit_log))
+    if _denominator <= 0:
+        raise ValueError("Cell count does not vary among the regression-fitting wells.")
+
+    cell_count_feature_slopes = (_centered_fit_log[:, None] * _fit_X).sum(axis=0) / _denominator
+    _reference_log_count = float(np.median(_fit_log))
+    X_cell_count_regressed = X - (
+        (_log_count - _reference_log_count)[:, None] * cell_count_feature_slopes[None, :]
+    )
+
+    print(
+        f"Exploratory {cell_count_regression_mode_input.value} regression: "
+        f"{int(_fit_mask.sum())} fitting wells; reference count ≈ {10 ** _reference_log_count:.0f} cells."
+    )
+    print("The corrected matrix is used only in Section 2b and does not replace downstream X.")
+    return X_cell_count_regressed, cell_count_feature_slopes
+
+
+@app.cell
+def _(
+    CONFIG,
+    FIGS_DIR,
+    PCA,
+    RANDOM_STATE,
+    X,
+    X_cell_count_regressed,
+    X_pca,
+    cell_count_regression_mode_input,
+    df,
+    np,
+    pca_full,
+    plt,
+    scatter_panel,
+    well_cell_counts,
+):
+    from matplotlib.colors import LogNorm as _LogNorm
+
+    pca_cell_count_regressed = PCA(n_components=min(X_pca.shape[1], X.shape[1]), random_state=RANDOM_STATE)
+    X_pca_cell_count_regressed = pca_cell_count_regressed.fit_transform(X_cell_count_regressed)
+    _log_count = np.log10(np.clip(np.asarray(well_cell_counts, dtype=float), 1, None))
+
+    _corr_rows = []
+    for _space, _coords, _model in (
+        ("original", X_pca, pca_full),
+        ("cell_count_regressed", X_pca_cell_count_regressed, pca_cell_count_regressed),
+    ):
+        for _pc_idx in range(2):
+            _corr_rows.append(
+                {
+                    "profile_space": _space,
+                    "pc": f"PC{_pc_idx + 1}",
+                    "pearson_r_log10_cell_count": float(np.corrcoef(_coords[:, _pc_idx], _log_count)[0, 1]),
+                    "variance_explained": float(_model.explained_variance_ratio_[_pc_idx]),
+                    "regression_mode": cell_count_regression_mode_input.value,
+                }
+            )
+    cell_count_pca_comparison = __import__("pandas").DataFrame(_corr_rows)
+
+    _positive_counts = np.clip(np.asarray(well_cell_counts, dtype=float), 1, None)
+    _norm = _LogNorm(vmin=_positive_counts.min(), vmax=_positive_counts.max())
+    _fig, _axes = plt.subplots(2, 2, figsize=(14, 11))
+    for _ax, _coords, _model, _title in (
+        (_axes[0, 0], X_pca, pca_full, "Original — cell count"),
+        (_axes[0, 1], X_pca_cell_count_regressed, pca_cell_count_regressed, "Regressed — cell count"),
+    ):
+        _sc = _ax.scatter(
+            _coords[:, 0], _coords[:, 1], c=_positive_counts, cmap="viridis", norm=_norm,
+            s=58, alpha=0.85, edgecolors="k", linewidths=0.35,
+        )
+        _ax.set_title(_title)
+        _ax.set_xlabel(f"PC1 ({_model.explained_variance_ratio_[0]:.1%})")
+        _ax.set_ylabel(f"PC2 ({_model.explained_variance_ratio_[1]:.1%})")
+    _fig.colorbar(_sc, ax=_axes[0, :].tolist(), label="Number of cells per well")
+
+    scatter_panel(
+        _axes[1, 0], X_pca[:, 0], X_pca[:, 1],
+        df[CONFIG.treatment_col].tolist(), "Original — treatment",
+    )
+    scatter_panel(
+        _axes[1, 1], X_pca_cell_count_regressed[:, 0], X_pca_cell_count_regressed[:, 1],
+        df[CONFIG.treatment_col].tolist(), "Regressed — treatment",
+    )
+    _axes[1, 0].set_xlabel(f"PC1 ({pca_full.explained_variance_ratio_[0]:.1%})")
+    _axes[1, 0].set_ylabel(f"PC2 ({pca_full.explained_variance_ratio_[1]:.1%})")
+    _axes[1, 1].set_xlabel(f"PC1 ({pca_cell_count_regressed.explained_variance_ratio_[0]:.1%})")
+    _axes[1, 1].set_ylabel(f"PC2 ({pca_cell_count_regressed.explained_variance_ratio_[1]:.1%})")
+    _fig.suptitle(
+        f"Exploratory cell-count regression ({cell_count_regression_mode_input.value})",
+        fontsize=13, fontweight="bold",
+    )
+    _fig.subplots_adjust(top=0.92, hspace=0.28, wspace=0.20)
+    _fig.savefig(FIGS_DIR / "pca_cell_count_regression_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close(_fig)
+    print(cell_count_pca_comparison.to_string(index=False))
+    print("  ✓  Saved: pca_cell_count_regression_comparison.png")
+    _fig
+    return X_pca_cell_count_regressed, cell_count_pca_comparison, pca_cell_count_regressed
+
+
+@app.cell
+def _(
+    CONFIG,
+    FIGS_DIR,
+    RESULTS_DIR,
+    X,
+    X_cell_count_regressed,
+    cell_count_pca_comparison,
+    cell_count_regression_mode_input,
+    copairs_compute_map,
+    df,
+    feat_cols,
+    pd,
+    plt,
+):
+    _comparison_dir = RESULTS_DIR / "cell_count_regression_exploratory"
+    _comparison_dir.mkdir(parents=True, exist_ok=True)
+    _sameby = [CONFIG.treatment_col]
+    if CONFIG.has_dose_axis and CONFIG.concentration_col:
+        _sameby.append(CONFIG.concentration_col)
+    _diffby = [CONFIG.plate_col] if CONFIG.plate_col and df[CONFIG.plate_col].nunique() > 1 else []
+
+    _map_rows = []
+    for _space, _matrix in (("original", X), ("cell_count_regressed", X_cell_count_regressed)):
+        _profile = df.copy()
+        _profile.loc[:, feat_cols] = _matrix
+        _map = copairs_compute_map(
+            _profile,
+            feat_cols,
+            pos_sameby=_sameby,
+            pos_diffby=_diffby,
+            neg_diffby=[CONFIG.treatment_col],
+            null_size=1000,
+            seed=42,
+            distance="cosine",
+        )
+        _map_rows.append(
+            {
+                "profile_space": _space,
+                "mean_map": float(_map["mean_average_precision"].mean()),
+                "median_map": float(_map["mean_average_precision"].median()),
+                "n_replicate_groups": int(len(_map)),
+                "regression_mode": cell_count_regression_mode_input.value,
+            }
+        )
+        _map.to_csv(_comparison_dir / f"map_{_space}.csv", index=False)
+
+    cell_count_regression_summary = pd.DataFrame(_map_rows)
+    _baseline_map = float(
+        cell_count_regression_summary.loc[
+            cell_count_regression_summary["profile_space"] == "original", "mean_map"
+        ].iloc[0]
+    )
+    cell_count_regression_summary["delta_mean_map_vs_original"] = (
+        cell_count_regression_summary["mean_map"] - _baseline_map
+    )
+    cell_count_regression_summary.to_csv(_comparison_dir / "map_summary.csv", index=False)
+    cell_count_pca_comparison.to_csv(_comparison_dir / "pca_cell_count_correlations.csv", index=False)
+
+    _fig, _ax = plt.subplots(figsize=(6.5, 4.5))
+    _bars = _ax.bar(
+        cell_count_regression_summary["profile_space"],
+        cell_count_regression_summary["mean_map"],
+        color=["#607d8b", "#7b1fa2"],
+    )
+    for _bar, _value in zip(_bars, cell_count_regression_summary["mean_map"]):
+        _ax.text(_bar.get_x() + _bar.get_width() / 2, _value, f"{_value:.3f}", ha="center", va="bottom")
+    _ax.set_ylabel("Mean average precision (copairs)")
+    _ax.set_title("Exploratory reproducibility before vs. after cell-count regression")
+    _ax.set_ylim(0, max(0.12, float(cell_count_regression_summary["mean_map"].max()) * 1.2))
+    _fig.tight_layout()
+    _fig.savefig(FIGS_DIR / "map_cell_count_regression_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close(_fig)
+    print("\nExploratory copairs mAP (cross-plate replicates when multiple plates are present):")
+    print(cell_count_regression_summary.to_string(index=False))
+    print("  ✓  Saved: map_cell_count_regression_comparison.png")
+    print(f"  ✓  Saved diagnostics: {_comparison_dir}")
+    _fig
+    return (cell_count_regression_summary,)
 
 
 @app.cell
@@ -1870,7 +2158,6 @@ def _():
     # scipy.cluster.hierarchy.linkage method shared by every clustermap and
     # side-by-side heatmap below, so all of them agree on well ordering.
     LINKAGE_METHOD = "average"
-
     return (
         LINKAGE_METHOD,
         LedoitWolf,
@@ -2008,31 +2295,99 @@ def _(mo):
     first needing to already know which wells belong together — a useful
     sanity check before trusting any of the metrics that summarize
     replicate agreement below.
+
+    **How rows and columns are organized:** by default, neither treatment nor
+    plate determines the order. The dendrogram is computed only from profile
+    similarity (`distance = 1 − similarity`); metadata colors are annotations
+    added afterwards. Use the controls below to temporarily sort the same
+    matrix by a metadata field and expose treatment, concentration, plate, or
+    other experimental blocks directly.
     """)
     return
 
 
 @app.cell
-def _(CONFIG, df, sns):
-    _treatments = sorted(df[CONFIG.treatment_col].astype(str).unique())
-    _plates = sorted(df[CONFIG.plate_col].astype(str).unique())
-
-    treatment_palette = dict(zip(_treatments, sns.color_palette("Set2", len(_treatments))))
-    plate_palette = dict(zip(_plates, sns.color_palette("Set3", len(_plates))))
-
-    treatment_colors = df[CONFIG.treatment_col].astype(str).map(treatment_palette)
-    treatment_colors.name = "Treatment"
-    plate_colors = df[CONFIG.plate_col].astype(str).map(plate_palette)
-    plate_colors.name = "Plate"
-
-    print(f"Treatment palette: {len(_treatments)} colors ({', '.join(_treatments)})")
-    print(f"Plate palette     : {len(_plates)} colors ({', '.join(_plates)})")
-    return plate_colors, treatment_colors
+def _(CONFIG, df, mo):
+    _candidate_columns = [
+        getattr(CONFIG, "treatment_col", None),
+        getattr(CONFIG, "concentration_col", None),
+        getattr(CONFIG, "plate_col", None),
+        getattr(CONFIG, "control_type_col", None),
+        getattr(CONFIG, "cell_type_col", None),
+        getattr(CONFIG, "time_col", None),
+        "Metadata_Cell_Type",
+        "Metadata_Time",
+    ]
+    heatmap_metadata_columns = list(dict.fromkeys(
+        _column for _column in _candidate_columns if _column and _column in df.columns
+    ))
+    _default_annotations = [
+        _column
+        for _column in (CONFIG.treatment_col, CONFIG.plate_col)
+        if _column in heatmap_metadata_columns
+    ]
+    heatmap_order_input = mo.ui.dropdown(
+        options=["Hierarchical similarity", *heatmap_metadata_columns],
+        value="Hierarchical similarity",
+        label="Order matrix by",
+    )
+    heatmap_annotations_input = mo.ui.multiselect(
+        options=heatmap_metadata_columns,
+        value=_default_annotations,
+        label="Annotation color tracks",
+    )
+    mo.hstack(
+        [heatmap_order_input, heatmap_annotations_input],
+        widths=[1, 2],
+        align="start",
+    )
+    return heatmap_annotations_input, heatmap_order_input
 
 
 @app.cell
-def _(LINKAGE_METHOD, linkage, np, pd, plt, sns, squareform):
-    def plot_similarity_clustermap(sim_matrix, treatment_colors, plate_colors, title, output_path):
+def _(df, heatmap_annotations_input, heatmap_order_input, pd, sns):
+    heatmap_order_column = (
+        None if heatmap_order_input.value == "Hierarchical similarity" else heatmap_order_input.value
+    )
+    heatmap_annotation_columns = list(heatmap_annotations_input.value)
+    heatmap_metadata = df.reset_index(drop=True)
+    heatmap_annotation_palettes = {}
+    heatmap_annotation_colors = pd.DataFrame(index=heatmap_metadata.index)
+
+    for _track_index, _column in enumerate(heatmap_annotation_columns):
+        _values = heatmap_metadata[_column].fillna("Missing").astype(str)
+
+        def _natural_key(_value):
+            try:
+                return (0, float(_value))
+            except ValueError:
+                return (1, _value.casefold())
+
+        _levels = sorted(_values.unique(), key=_natural_key)
+        _palette_name = ("Set2", "Set3", "tab10", "husl")[_track_index % 4]
+        _colors = sns.color_palette(_palette_name, n_colors=len(_levels))
+        _palette = dict(zip(_levels, _colors))
+        heatmap_annotation_palettes[_column] = _palette
+        heatmap_annotation_colors[_column] = _values.map(_palette)
+    return (
+        heatmap_annotation_colors,
+        heatmap_annotation_palettes,
+        heatmap_metadata,
+        heatmap_order_column,
+    )
+
+
+@app.cell
+def _(LINKAGE_METHOD, Patch, linkage, np, pd, plt, sns, squareform):
+    def plot_similarity_clustermap(
+        sim_matrix,
+        metadata,
+        annotation_colors,
+        annotation_palettes,
+        ordering_column,
+        title,
+        output_path,
+    ):
         """Similarity heatmap reordered by its own hierarchical clustering.
 
         Clustering is computed from the *distance* (``1 - similarity``) but
@@ -2042,32 +2397,77 @@ def _(LINKAGE_METHOD, linkage, np, pd, plt, sns, squareform):
         similarity matrix (which `scipy.cluster.hierarchy` doesn't treat as
         a proper metric).
         """
-        distance_matrix = 1.0 - sim_matrix
-        np.fill_diagonal(distance_matrix, 0.0)
-        condensed = squareform(distance_matrix, checks=False)
-        linkage_matrix = linkage(condensed, method=LINKAGE_METHOD)
-
-        # seaborn's clustermap requires `data` to carry a pandas index
-        # whenever row/col_colors is a DataFrame/Series (it reindexes
-        # colors onto data.index) -- sim_matrix is a plain ndarray, so wrap
-        # it with the same default RangeIndex as treatment/plate_colors.
-        row_colors = pd.DataFrame(
-            {"Treatment": treatment_colors.to_numpy(), "Plate": plate_colors.to_numpy()}
-        )
         sim_df = pd.DataFrame(sim_matrix)
+        plot_colors = annotation_colors if len(annotation_colors.columns) else None
+
+        if ordering_column is None:
+            distance_matrix = 1.0 - sim_matrix
+            np.fill_diagonal(distance_matrix, 0.0)
+            condensed = squareform(distance_matrix, checks=False)
+            linkage_matrix = linkage(condensed, method=LINKAGE_METHOD)
+            row_linkage = linkage_matrix
+            col_linkage = linkage_matrix
+            row_cluster = True
+            col_cluster = True
+            order_description = f"hierarchical similarity ({LINKAGE_METHOD} linkage)"
+        else:
+            _sort_values = metadata[ordering_column]
+            _numeric_sort = pd.to_numeric(_sort_values, errors="coerce")
+            _sort_frame = pd.DataFrame({
+                "missing": _sort_values.isna(),
+                "numeric": _numeric_sort,
+                "text": _sort_values.fillna("Missing").astype(str).str.casefold(),
+            })
+            _order = _sort_frame.sort_values(
+                ["missing", "numeric", "text"], kind="stable", na_position="last"
+            ).index.to_numpy()
+            sim_df = sim_df.iloc[_order, _order]
+            if plot_colors is not None:
+                plot_colors = plot_colors.iloc[_order]
+                plot_colors.index = sim_df.index
+            row_linkage = None
+            col_linkage = None
+            row_cluster = False
+            col_cluster = False
+            order_description = ordering_column
 
         grid = sns.clustermap(
             sim_df,
-            row_linkage=linkage_matrix,
-            col_linkage=linkage_matrix,
-            row_colors=row_colors,
+            row_linkage=row_linkage,
+            col_linkage=col_linkage,
+            row_cluster=row_cluster,
+            col_cluster=col_cluster,
+            row_colors=plot_colors,
+            col_colors=plot_colors,
             cmap="RdYlBu_r",
-            figsize=(12, 10),
+            vmin=-1,
+            vmax=1,
+            center=0,
+            figsize=(14, 11),
             dendrogram_ratio=(0.15, 0.15),
             xticklabels=False,
             yticklabels=False,
         )
-        grid.figure.suptitle(title, y=1.02)
+        grid.figure.suptitle(f"{title}\nOrder: {order_description}", y=1.04)
+        grid.cax.set_ylabel("Profile similarity", rotation=270, labelpad=16)
+
+        _legend_handles = []
+        for _column, _palette in annotation_palettes.items():
+            for _level, _color in _palette.items():
+                _legend_handles.append(
+                    Patch(facecolor=_color, edgecolor="none", label=f"{_column}: {_level}")
+                )
+        if _legend_handles:
+            grid.figure.legend(
+                handles=_legend_handles,
+                title="Annotation colors",
+                loc="center left",
+                bbox_to_anchor=(1.01, 0.5),
+                frameon=True,
+                fontsize=8,
+                title_fontsize=9,
+            )
+
         grid.savefig(output_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
         grid.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
         plt.close(grid.figure)
@@ -2077,21 +2477,40 @@ def _(LINKAGE_METHOD, linkage, np, pd, plt, sns, squareform):
 
 
 @app.cell
-def _(SIMILARITY_FIGS_DIR, mo, plate_colors, plot_similarity_clustermap, similarity_matrices, treatment_colors):
+def _(
+    SIMILARITY_FIGS_DIR,
+    heatmap_annotation_colors,
+    heatmap_annotation_palettes,
+    heatmap_metadata,
+    heatmap_order_column,
+    mo,
+    plot_similarity_clustermap,
+    similarity_matrices,
+):
     _figures = []
+    _order_slug = "hierarchical" if heatmap_order_column is None else heatmap_order_column.lower().replace("metadata_", "").replace(" ", "_")
     for _metric in ("pearson", "cosine"):
         if _metric not in similarity_matrices:
             continue
         _fig = plot_similarity_clustermap(
             similarity_matrices[_metric],
-            treatment_colors,
-            plate_colors,
-            title=f"{_metric.capitalize()} similarity — hierarchically clustered",
-            output_path=SIMILARITY_FIGS_DIR / f"clustermap_{_metric}",
+            heatmap_metadata,
+            heatmap_annotation_colors,
+            heatmap_annotation_palettes,
+            heatmap_order_column,
+            title=f"{_metric.capitalize()} similarity heatmap",
+            output_path=SIMILARITY_FIGS_DIR / f"clustermap_{_metric}_by_{_order_slug}",
         )
         _figures.append(_fig)
-        print(f"✓ Saved: clustermap_{_metric}.png / .svg")
-    mo.vstack(_figures) if _figures else None
+        _png_path = SIMILARITY_FIGS_DIR / f"clustermap_{_metric}_by_{_order_slug}.png"
+        _svg_path = SIMILARITY_FIGS_DIR / f"clustermap_{_metric}_by_{_order_slug}.svg"
+        print(f"✓ Saved: {_png_path.name} / {_svg_path.name}")
+
+    if _figures:
+        _output = mo.vstack(_figures)
+    else:
+        _output = mo.callout("No Pearson or cosine similarity matrix is available to plot.", kind="warn")
+    _output
     return
 
 
@@ -2168,7 +2587,17 @@ def _(SIMILARITY_FIGS_DIR, linkage, np, plt, similarity_matrices, squareform):
 
 
 @app.cell
-def _(CONFIG, df, fcluster, linkage, mantel_df, np, pd, similarity_matrices, squareform):
+def _(
+    CONFIG,
+    df,
+    fcluster,
+    linkage,
+    mantel_df,
+    np,
+    pd,
+    similarity_matrices,
+    squareform,
+):
     _n_treatments = df[CONFIG.treatment_col].nunique()
     _rows = []
     for _metric, _sim in similarity_matrices.items():
@@ -2263,7 +2692,15 @@ def _(CONFIG, X, df, np):
 
 
 @app.cell
-def _(CONFIG, SIMILARITY_FIGS_DIR, df, null_dist, np, plt, similarity_matrices):
+def _(
+    CONFIG,
+    SIMILARITY_FIGS_DIR,
+    df,
+    np,
+    null_dist,
+    plt,
+    similarity_matrices,
+):
     _labels = df[CONFIG.treatment_col].to_numpy()
     _pearson = similarity_matrices["pearson"]
 
@@ -2289,7 +2726,14 @@ def _(CONFIG, SIMILARITY_FIGS_DIR, df, null_dist, np, plt, similarity_matrices):
 
 
 @app.cell
-def _(CONFIG, df, null_dist, pd, percent_replicating_simplified, similarity_matrices):
+def _(
+    CONFIG,
+    df,
+    null_dist,
+    pd,
+    percent_replicating_simplified,
+    similarity_matrices,
+):
     _pr, _medians, _threshold = percent_replicating_simplified(
         similarity_matrices["pearson"], df[CONFIG.treatment_col].to_numpy(), null_dist,
     )
@@ -2369,7 +2813,15 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, RESULTS_DIR, SIMILARITY_FIGS_DIR, df, pd, plt, similarity_matrices):
+def _(
+    CONFIG,
+    RESULTS_DIR,
+    SIMILARITY_FIGS_DIR,
+    df,
+    pd,
+    plt,
+    similarity_matrices,
+):
     _map_csv = RESULTS_DIR / "quality_metrics" / "app_a_per_plate_map.csv"
     if _map_csv.exists():
         _map_df = pd.read_csv(_map_csv)
@@ -2551,7 +3003,11 @@ def _(mo):
             ),
         }
     )
-    return graph_k_max_input, graph_knn_neighbors_input, graph_n_bootstrap_input
+    return (
+        graph_k_max_input,
+        graph_knn_neighbors_input,
+        graph_n_bootstrap_input,
+    )
 
 
 @app.cell
@@ -2599,7 +3055,14 @@ def _():
 
 
 @app.cell
-def _(X, graph_knn_neighbors_input, kneighbors_graph, np, rbf_kernel, similarity_matrices):
+def _(
+    X,
+    graph_knn_neighbors_input,
+    kneighbors_graph,
+    np,
+    rbf_kernel,
+    similarity_matrices,
+):
     # RBF and k-NN graph are new affinity constructions; cosine/Pearson reuse
     # Section 8b's similarity matrices as-is (shifted from [-1, 1] to [0, 1]
     # since spectral clustering requires a nonnegative affinity) rather than
@@ -2680,7 +3143,16 @@ def _(
 
 
 @app.cell
-def _(KMeans, RANDOM_STATE, SpectralClustering, X, adjusted_rand_score, graph_n_bootstrap_input, np, pd):
+def _(
+    KMeans,
+    RANDOM_STATE,
+    SpectralClustering,
+    X,
+    adjusted_rand_score,
+    graph_n_bootstrap_input,
+    np,
+    pd,
+):
     # Representative k for the stability check (the sweep above already
     # covers k's effect on cluster quality; this asks a different question —
     # holding k fixed, how much does the clustering change under resampling?).
@@ -2772,7 +3244,14 @@ def _(
 
 
 @app.cell
-def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, df, manifold_embeddings, plt, scatter_panel):
+def _(
+    CONFIG,
+    GRAPH_CLUSTERING_FIGS_DIR,
+    df,
+    manifold_embeddings,
+    plt,
+    scatter_panel,
+):
     _names = list(manifold_embeddings.keys())
     _fig, _axes = plt.subplots(1, len(_names), figsize=(5.5 * len(_names), 5))
     _axes = [_axes] if len(_names) == 1 else list(_axes)
@@ -2791,7 +3270,7 @@ def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, df, manifold_embeddings, plt, scatter_p
 
 
 @app.cell
-def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, X, cosine_similarity, df, plt, pd):
+def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, X, cosine_similarity, df, pd, plt):
     # Treatment-level consensus profiles: if wells within a treatment
     # average out to well-separated points, that supports discrete clusters;
     # if consensus profiles instead grade smoothly into each other (or sit at
@@ -2853,7 +3332,6 @@ def _(clustering_comparison_df, consensus_similarity_df, np, stability_df):
         str(consensus_similarity_df.columns[_min_idx[1]]),
     )
     most_anticorrelated_value = float(_sim[_min_idx])
-
     return (
         best_k_kmeans,
         best_k_kmeans_silhouette,

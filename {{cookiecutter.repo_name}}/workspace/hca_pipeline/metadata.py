@@ -65,6 +65,40 @@ def ensure_core_metadata(
 # names unique; left alone, those ride along into every downstream file as
 # distinct-looking but fully redundant columns.
 _META_DUPLICATE_SUFFIX_RE = re.compile(r"^(Metadata_.+?)(?:_[xy]\d*|(?:\.\d+)+)$")
+CELL_COUNT_METADATA_COLUMN = "Metadata_Cell_Count"
+
+
+def add_cell_count_metadata(
+    df: pd.DataFrame,
+    *,
+    plate_col: str = "Metadata_Plate",
+    well_col: str = "Metadata_Well",
+    output_col: str = CELL_COUNT_METADATA_COLUMN,
+) -> pd.DataFrame:
+    """Attach the number of single-cell rows in each plate/well as metadata.
+
+    The returned column deliberately starts with ``Metadata_`` so feature
+    inference, normalization, and feature selection never treat cell count as
+    a morphological measurement. The count is repeated on every single-cell
+    row and therefore survives a later per-well groupby as an invariant
+    stratum value.
+    """
+    missing = [column for column in (plate_col, well_col) if column not in df.columns]
+    if missing:
+        raise ValueError(f"Cannot calculate cell count metadata; missing columns: {missing}")
+
+    result = df.copy()
+    computed = result.groupby([plate_col, well_col], observed=True)[well_col].transform("size").astype("int64")
+    if output_col in result.columns:
+        existing = pd.to_numeric(result[output_col], errors="coerce")
+        mismatched = existing.isna() | existing.ne(computed)
+        if mismatched.any():
+            raise ValueError(
+                f"Existing {output_col!r} disagrees with the observed single-cell row count "
+                f"for {int(mismatched.sum())} row(s)."
+            )
+    result[output_col] = computed
+    return result
 
 
 def dedupe_meta(df: pd.DataFrame) -> pd.DataFrame:

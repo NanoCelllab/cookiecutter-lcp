@@ -262,6 +262,15 @@ class ExperimentConfig:
     overwrite_existing_outputs: bool = False
     save_provenance_history: bool = False
 
+    # Analysis scope is intentionally separate from ingestion: NB01 always
+    # preserves every detected plate, while NB02 and later notebooks use this
+    # persisted subset. An empty list means "all currently available plates"
+    # for backward compatibility with existing projects.
+    included_plates: list[str] = field(default_factory=list)
+    excluded_plate_reasons: dict[str, str] = field(default_factory=dict)
+    required_reference_treatments: list[str] = field(default_factory=list)
+    analysis_mode: str = "final"
+
     @staticmethod
     def config_path(repo_root: Path, experiment_id: str) -> Path:
         return repo_root / "workspace" / "metadata" / experiment_id / "experiment_config.json"
@@ -288,6 +297,26 @@ class ExperimentConfig:
             encoding="utf-8",
         )
         return path
+
+    def resolve_plate_scope(self, available_plates) -> list[str]:
+        """Resolve the persisted analysis subset against plates on disk.
+
+        Returns all available plates when no subset has been configured.
+        A configured plate that is no longer present is treated as a blocking
+        configuration error rather than being silently ignored.
+        """
+        available = list(dict.fromkeys(str(plate) for plate in available_plates))
+        requested = list(dict.fromkeys(str(plate) for plate in self.included_plates))
+        if not requested:
+            return available
+
+        missing = [plate for plate in requested if plate not in available]
+        if missing:
+            raise ValueError(
+                "Configured included_plates are not present in the current input: "
+                + ", ".join(missing)
+            )
+        return requested
 
     def resolve_columns(self, df) -> "ExperimentConfig":
         """Return a copy with column-name fields reconciled against *df* (case-tolerant).

@@ -77,18 +77,7 @@ def _():
     import pandas as pd
 
     pd.set_option("display.max_columns", 80)
-    return (
-        Path,
-        Sequence,
-        datetime,
-        json,
-        np,
-        pd,
-        platform,
-        plt,
-        subprocess,
-        timezone,
-    )
+    return Path, datetime, json, pd, platform, plt, subprocess, timezone
 
 
 @app.cell
@@ -202,7 +191,7 @@ def _(CONFIG, EXPERIMENT_ID, REPO_ROOT):
             "ℹ️  NB00 SKIPPED — CONFIG.image_root is not set for this experiment.\n"
             "   Set it via NB01's config wizard if raw images are available."
         )
-    return ANALYSIS_DIR, FIGS_DIR, IMAGE_QC_ENABLED, IMAGE_ROOT_PATH, RESULTS_DIR
+    return FIGS_DIR, IMAGE_QC_ENABLED, IMAGE_ROOT_PATH, RESULTS_DIR
 
 
 @app.cell
@@ -240,7 +229,7 @@ def _(
                 print(f"    - {_failure['filepath']}: {_failure['error']}")
             if len(failed_images) > 10:
                 print(f"    ... and {len(failed_images) - 10} more")
-    return failed_images, image_qc_df
+    return (image_qc_df,)
 
 
 @app.cell
@@ -540,15 +529,15 @@ def _(
         )
         _metrics_md = mo.md(
             f"""
-**Fail reason:** {_row['fail_reason']}
+    **Fail reason:** {_row['fail_reason']}
 
-**Focus score:** {_row['focus_score']:.4g}&nbsp;&nbsp;&nbsp;
-**Saturated fraction:** {_row['saturated_fraction']:.4g}&nbsp;&nbsp;&nbsp;
-**Zero fraction:** {_row['zero_fraction']:.4g}&nbsp;&nbsp;&nbsp;
-**SNR:** {_row['snr']:.4g}
+    **Focus score:** {_row['focus_score']:.4g}&nbsp;&nbsp;&nbsp;
+    **Saturated fraction:** {_row['saturated_fraction']:.4g}&nbsp;&nbsp;&nbsp;
+    **Zero fraction:** {_row['zero_fraction']:.4g}&nbsp;&nbsp;&nbsp;
+    **SNR:** {_row['snr']:.4g}
 
-**File:** `{_row['filepath']}`
-"""
+    **File:** `{_row['filepath']}`
+    """
         )
         plt.close(_fig)
         _display = mo.vstack([_fig, _metrics_md])
@@ -599,7 +588,7 @@ def _(
             excluded_sites_df, excluded_sites_csv, overwrite=CONFIG.overwrite_existing_outputs
         )
         print(f"✓ Excluded-sites list {_status_excluded}: {excluded_sites_csv}")
-    return excluded_sites_csv, image_qc_metrics_csv, image_qc_per_well_csv
+    return (excluded_sites_csv,)
 
 
 @app.cell
@@ -614,10 +603,9 @@ def _(mo):
 def _(
     EXPERIMENT_ID,
     IMAGE_QC_ENABLED,
-    RESULTS_DIR,
     REPO_ROOT,
+    RESULTS_DIR,
     datetime,
-    excluded_sites_csv,
     excluded_sites_df,
     image_qc_df_flagged,
     json,

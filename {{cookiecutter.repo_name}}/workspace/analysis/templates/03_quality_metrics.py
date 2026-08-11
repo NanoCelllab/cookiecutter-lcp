@@ -922,6 +922,7 @@ def _(mo):
 
 @app.cell
 def _(
+    CONFIG,
     batch_result,
     dose_result,
     generate_go_nogo_dashboard,
@@ -930,9 +931,17 @@ def _(
     tvc_result,
 ):
     dashboard = generate_go_nogo_dashboard(qc_result, batch_result, dose_result, tvc_result, time_result)
+    dashboard["analysis_mode"] = CONFIG.analysis_mode
+    dashboard["reported_decision"] = (
+        f"PRELIMINARY — {dashboard['decision']}"
+        if CONFIG.analysis_mode == "preliminary"
+        else dashboard["decision"]
+    )
 
     print("=== Section 9: Go/No-Go Dashboard ===\n")
-    print(f"DECISION: {dashboard['decision']}")
+    print(f"DECISION: {dashboard['reported_decision']}")
+    if CONFIG.analysis_mode == "preliminary":
+        print("This is an early plate-scope assessment; rerun in final mode after all planned plates are included.")
     print(f"Rationale: {dashboard['rationale']}\n")
     print("--- Checks ---")
     print(dashboard["checks"][["check_id", "name", "n_pass", "n_total", "pass", "critical",
@@ -1031,7 +1040,8 @@ def _(
 def _(EXPERIMENT_ID, RESULTS_DIR, dashboard):
     _report_lines = [
         f"# Quality Metrics Go/No-Go Report — {EXPERIMENT_ID}",
-        f"## Decision: {dashboard['decision']}",
+        f"## Decision: {dashboard['reported_decision']}",
+        f"\n**Analysis mode:** {dashboard['analysis_mode']}",
         f"\n**Rationale:** {dashboard['rationale']}",
         "\n## Metric Summary",
         f"- Plates: {dashboard['metric_summary']['n_plates']}",
@@ -1064,6 +1074,7 @@ def _(mo):
 
 @app.cell
 def _(
+    CONFIG,
     EXPERIMENT_ID,
     REPO_ROOT,
     RESULTS_DIR,
@@ -1094,7 +1105,12 @@ def _(
         "git_hash": (_git_commit or "unknown")[:8],
         "n_wells": int(df.shape[0]),
         "n_features": int(len(feat_cols)),
+        "analysis_mode": CONFIG.analysis_mode,
+        "included_plates": CONFIG.included_plates,
+        "excluded_plate_reasons": CONFIG.excluded_plate_reasons,
+        "required_reference_treatments": CONFIG.required_reference_treatments,
         "decision": dashboard["decision"],
+        "reported_decision": dashboard["reported_decision"],
         "rationale": dashboard["rationale"],
         "metric_summary": dashboard["metric_summary"],
         "python_version": platform.python_version(),
@@ -1108,7 +1124,7 @@ def _(
     print(f"  Experiment: {provenance['experiment_id']}")
     print(f"  Timestamp:  {provenance['timestamp']}")
     print(f"  Git hash:   {provenance['git_hash']}")
-    print(f"  Decision:   {provenance['decision']}")
+    print(f"  Decision:   {provenance['reported_decision']}")
     return (provenance,)
 
 
@@ -1142,7 +1158,7 @@ def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, provenance):
     print("═" * 72)
     print("✓ All final integrity checks passed\n")
     print(f"  Experiment:  {EXPERIMENT_ID}")
-    print(f"  Decision:    {dashboard['decision']}")
+    print(f"  Decision:    {dashboard['reported_decision']}")
     print(f"  Rationale:   {dashboard['rationale']}")
     print("\n  Results directory:")
     print(f"    {RESULTS_DIR}")
@@ -1175,26 +1191,6 @@ def _(mo):
     - `results/quality_metrics/quality_metrics_report.md` — human-readable Go/No-Go report
     - `results/quality_metrics/provenance.json` — run provenance
     """)
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _():
     return
 
 

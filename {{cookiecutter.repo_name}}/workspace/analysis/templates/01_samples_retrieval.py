@@ -139,6 +139,7 @@ def _(Path):
         write_summary_table_protected,
     )
     from hca_pipeline.metadata import (
+        add_cell_count_metadata,
         norm_well,
         ensure_core_metadata,
         dedupe_meta,
@@ -153,6 +154,7 @@ def _(Path):
         ExperimentConfig,
         REPO_ROOT,
         SUPPORTED_PLATE_FORMATS,
+        add_cell_count_metadata,
         dedupe_meta,
         ensure_core_metadata,
         infer_feature_cols,
@@ -591,6 +593,125 @@ def _(df_all):
 
 
 @app.cell
+def _(CONFIG, mo, plate_dfs):
+    detected_plates = list(plate_dfs)
+    _configured_plates = CONFIG.resolve_plate_scope(detected_plates)
+    _reason_lines = "\n".join(
+        f"{_plate}: {_reason}"
+        for _plate, _reason in CONFIG.excluded_plate_reasons.items()
+        if _plate in detected_plates
+    )
+
+    included_plates_input = mo.ui.multiselect(
+        options=detected_plates,
+        value=_configured_plates,
+        label="Plates included in downstream analysis",
+    )
+    analysis_mode_input = mo.ui.dropdown(
+        options=["preliminary", "final"],
+        value=CONFIG.analysis_mode if CONFIG.analysis_mode in {"preliminary", "final"} else "final",
+        label="Analysis mode",
+    )
+    required_references_input = mo.ui.text(
+        value=", ".join(CONFIG.required_reference_treatments),
+        label="Required reference treatments (comma-separated)",
+        full_width=True,
+    )
+    exclusion_reasons_input = mo.ui.text_area(
+        value=_reason_lines,
+        label='Excluded plate reasons, one "Plate: reason" per line',
+        full_width=True,
+    )
+
+    mo.vstack(
+        [
+            mo.md("## 3b — Analysis plate scope"),
+            mo.md(
+                "NB01 always exports every detected plate. This selection is persisted and applied "
+                "only when NB02 builds downstream analysis checkpoints."
+            ),
+            included_plates_input,
+            mo.hstack([analysis_mode_input, required_references_input], widths=[1, 2]),
+            exclusion_reasons_input,
+        ]
+    )
+    return (
+        analysis_mode_input,
+        detected_plates,
+        exclusion_reasons_input,
+        included_plates_input,
+        required_references_input,
+    )
+
+
+@app.cell
+def _(
+    CONFIG,
+    REPO_ROOT,
+    analysis_mode_input,
+    detected_plates,
+    exclusion_reasons_input,
+    included_plates_input,
+    mo,
+    pd,
+    plate_dfs,
+    replace,
+    required_references_input,
+):
+    included_plates = list(included_plates_input.value)
+    if not included_plates:
+        raise ValueError("Select at least one plate for downstream analysis.")
+
+    _excluded_plates = [plate for plate in detected_plates if plate not in included_plates]
+    _parsed_reasons = {}
+    for _line in exclusion_reasons_input.value.splitlines():
+        _line = _line.strip()
+        if not _line or ":" not in _line:
+            continue
+        _plate, _reason = _line.split(":", 1)
+        _parsed_reasons[_plate.strip()] = _reason.strip()
+    excluded_plate_reasons = {
+        plate: _parsed_reasons.get(plate, "Excluded from downstream analysis")
+        for plate in _excluded_plates
+    }
+    required_reference_treatments = [
+        value.strip() for value in required_references_input.value.split(",") if value.strip()
+    ]
+
+    ANALYSIS_CONFIG = replace(
+        CONFIG,
+        included_plates=included_plates,
+        excluded_plate_reasons=excluded_plate_reasons,
+        required_reference_treatments=required_reference_treatments,
+        analysis_mode=analysis_mode_input.value,
+    )
+    _scope_config_path = ANALYSIS_CONFIG.save(REPO_ROOT)
+
+    plate_scope_df = pd.DataFrame(
+        [
+            {
+                "Plate": plate,
+                "Included": plate in included_plates,
+                "Cells": len(plate_dfs[plate]),
+                "Wells": plate_dfs[plate]["Metadata_Well"].nunique(),
+                "Reason if excluded": excluded_plate_reasons.get(plate, ""),
+            }
+            for plate in detected_plates
+        ]
+    )
+    mo.vstack(
+        [
+            mo.md(
+                f"**Persisted analysis scope:** `{len(included_plates)}/{len(detected_plates)}` plates · "
+                f"mode `{ANALYSIS_CONFIG.analysis_mode}` · `{_scope_config_path}`"
+            ),
+            plate_scope_df,
+        ]
+    )
+    return ANALYSIS_CONFIG, included_plates, plate_scope_df
+
+
+@app.cell
 def _(mo):
     mo.md(r"""
     ## 4 — Structural validation and cell-count QC
@@ -752,38 +873,79 @@ def _(mo):
 
 @app.cell
 def _(
+    ANALYSIS_CONFIG,
     EXPERIMENT_ID,
     WORKSPACE_DIR,
+    mo,
+    pd,
     plate_dfs,
     read_barcode_platemap,
     read_platemap_layout,
     show_treatment_labels_input,
 ):
     well_treatments_by_plate: dict[str, dict[str, str]] = {}
-    if show_treatment_labels_input.value:
-        _metadata_dir = WORKSPACE_DIR / "metadata" / EXPERIMENT_ID
-        _barcode_csv = _metadata_dir / "barcode_platemap.csv"
-        _platemap_dir = _metadata_dir / "platemap"
-        if _barcode_csv.exists() and _platemap_dir.is_dir():
-            try:
-                _barcode_index = read_barcode_platemap(_barcode_csv)
-                for _plate_id in plate_dfs:
-                    _row = _barcode_index.loc[_barcode_index["Metadata_Plate"] == _plate_id]
-                    if _row.empty:
-                        continue
-                    _pm_path = _platemap_dir / _row["filename"].iloc[0]
-                    if not _pm_path.exists():
-                        continue
-                    _pm = read_platemap_layout(_pm_path)
+    _coverage_rows = []
+    _metadata_dir = WORKSPACE_DIR / "metadata" / EXPERIMENT_ID
+    _barcode_csv = _metadata_dir / "barcode_platemap.csv"
+    _platemap_dir = _metadata_dir / "platemap"
+    if _barcode_csv.exists() and _platemap_dir.is_dir():
+        try:
+            _barcode_index = read_barcode_platemap(_barcode_csv)
+            for _plate_id in plate_dfs:
+                _row = _barcode_index.loc[_barcode_index["Metadata_Plate"] == _plate_id]
+                if _row.empty:
+                    continue
+                _pm_path = _platemap_dir / _row["filename"].iloc[0]
+                if not _pm_path.exists():
+                    continue
+                _pm = read_platemap_layout(_pm_path)
+                if show_treatment_labels_input.value:
                     well_treatments_by_plate[_plate_id] = dict(
                         zip(_pm["Metadata_Well"], _pm["Metadata_Treatment"].astype(str))
                     )
-                print(f"  ✓  Loaded treatment labels for {len(well_treatments_by_plate)}/{len(plate_dfs)} plate(s)")
-            except Exception as error:
-                print(f"  ⚠️  Could not load treatment labels for plate maps: {error}")
-        else:
-            print("  ℹ️  Platemap not found — plate maps will show cell counts only")
-    return (well_treatments_by_plate,)
+                _observed_wells = set(plate_dfs[_plate_id]["Metadata_Well"].astype(str))
+                _pm_observed = _pm.loc[_pm["Metadata_Well"].astype(str).isin(_observed_wells)]
+                for _treatment, _count in _pm_observed["Metadata_Treatment"].astype(str).value_counts().items():
+                    _coverage_rows.append(
+                        {"Plate": _plate_id, "Treatment": _treatment, "Observed wells": int(_count)}
+                    )
+            print(f"  ✓  Loaded platemap coverage for {len(set(r['Plate'] for r in _coverage_rows))}/{len(plate_dfs)} plate(s)")
+        except Exception as error:
+            print(f"  ⚠️  Could not load platemap coverage: {error}")
+    else:
+        print("  ℹ️  Platemap not found — plate coverage cannot be assessed")
+
+    plate_treatment_coverage = pd.DataFrame(
+        _coverage_rows, columns=["Plate", "Treatment", "Observed wells"]
+    )
+    _coverage_table = (
+        plate_treatment_coverage.pivot_table(
+            index="Plate", columns="Treatment", values="Observed wells", fill_value=0, aggfunc="sum"
+        ).astype(int)
+        if not plate_treatment_coverage.empty
+        else pd.DataFrame()
+    )
+    _missing_rows = []
+    for _plate in ANALYSIS_CONFIG.included_plates:
+        _present = set(
+            plate_treatment_coverage.loc[
+                plate_treatment_coverage["Plate"].eq(_plate), "Treatment"
+            ].astype(str)
+        )
+        _missing = [ref for ref in ANALYSIS_CONFIG.required_reference_treatments if ref not in _present]
+        _missing_rows.append(
+            {"Plate": _plate, "Missing required references": ", ".join(_missing) or "None"}
+        )
+    _reference_status = pd.DataFrame(_missing_rows)
+    mo.vstack(
+        [
+            mo.md("### Plate × treatment coverage"),
+            _coverage_table if not _coverage_table.empty else mo.md("No platemap coverage available."),
+            mo.md("### Required-reference check for included plates"),
+            _reference_status,
+        ]
+    )
+    return plate_treatment_coverage, well_treatments_by_plate
 
 
 @app.cell
@@ -1083,7 +1245,7 @@ def _(mo):
 
 
 @app.cell
-def _(MIN_CELLS_PER_WELL, df_all, pd):
+def _(MIN_CELLS_PER_WELL, add_cell_count_metadata, df_all, pd):
     def normalize_count_table(table: pd.DataFrame) -> pd.DataFrame:
         """Return a standardized cell-count table for safe comparison."""
         required_columns = ["Metadata_Plate", "Metadata_Well", "n_cells"]
@@ -1103,6 +1265,7 @@ def _(MIN_CELLS_PER_WELL, df_all, pd):
         .rename("n_cells")
         .reset_index()
     )
+    df_all_with_counts = add_cell_count_metadata(df_all)
     low_count_wells = counts_df.loc[counts_df["n_cells"] < MIN_CELLS_PER_WELL].copy()
 
     print("═" * 72)
@@ -1123,7 +1286,7 @@ def _(MIN_CELLS_PER_WELL, df_all, pd):
         print("\n  Wells below threshold:")
         for row in low_count_wells.itertuples(index=False):
             print(f"    - {row.Metadata_Plate} / {row.Metadata_Well}: {row.n_cells:,} cells")
-    return counts_df, low_count_wells
+    return counts_df, df_all_with_counts, low_count_wells
 
 
 @app.cell
@@ -1142,7 +1305,7 @@ def _(mo):
     ## 7 — Feature-integrity diagnostic
 
     This is a **report-only** step. It counts missing and infinite
-    values but does not modify `df_all`, and NB02 does not read this file
+    values but does not modify `df_all_with_counts`, and NB02 does not read this file
     back in — NB02 computes its own missingness/imputation decisions
     independently. The report saved here exists purely for human
     auditability: a per-feature breakdown of what's missing or infinite
@@ -1156,17 +1319,17 @@ def _(mo):
 def _(
     CONFIG,
     RESULTS_DIR,
-    df_all,
+    df_all_with_counts,
     infer_feature_cols,
     np,
     pd,
     write_summary_table_protected,
 ):
-    feature_columns = infer_feature_cols(df_all)
+    feature_columns = infer_feature_cols(df_all_with_counts)
     if not feature_columns:
-        raise ValueError("No feature columns were detected in df_all.")
+        raise ValueError("No feature columns were detected in df_all_with_counts.")
 
-    raw_feature_values = df_all[feature_columns]
+    raw_feature_values = df_all_with_counts[feature_columns]
     finite_view = raw_feature_values.replace([np.inf, -np.inf], np.nan)
 
     feature_integrity_df = pd.DataFrame(
@@ -1204,7 +1367,7 @@ def _(
     print("═" * 72)
     print("FEATURE-INTEGRITY DIAGNOSTIC")
     print("═" * 72)
-    print(f"  Cells evaluated:                  {len(df_all):,}")
+    print(f"  Cells evaluated:                  {len(df_all_with_counts):,}")
     print(f"  Feature columns:                  {len(feature_columns):,}")
     print("\n  Feature completeness:")
     print(f"    Complete features:              {n_complete_features:,}")
@@ -1252,23 +1415,26 @@ def _(
     CONFIG,
     OUTPUT_CSV,
     OUTPUT_PARQUET,
-    df_all,
+    df_all_with_counts,
     write_csv_protected,
     write_parquet_protected,
 ):
     print("═" * 72)
     print("SINGLE-CELL PROFILE EXPORT")
     print("═" * 72)
-    print(f"  Current dataset:     {len(df_all):,} cells × {df_all.shape[1]:,} columns\n")
+    print(
+        f"  Current dataset:     {len(df_all_with_counts):,} cells × "
+        f"{df_all_with_counts.shape[1]:,} columns\n"
+    )
 
     parquet_export_status = write_parquet_protected(
-        df_all, OUTPUT_PARQUET, overwrite=CONFIG.overwrite_existing_outputs
+        df_all_with_counts, OUTPUT_PARQUET, overwrite=CONFIG.overwrite_existing_outputs
     )
     print(f"✓ Parquet profile {parquet_export_status}")
     print(f"  File: {OUTPUT_PARQUET}")
 
     csv_export_status = write_csv_protected(
-        df_all, OUTPUT_CSV, overwrite=CONFIG.overwrite_existing_outputs
+        df_all_with_counts, OUTPUT_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
     print(f"\n✓ CSV interoperability copy {csv_export_status}")
     print(f"  File: {OUTPUT_CSV}")
@@ -1289,6 +1455,7 @@ def _(mo):
 
 @app.cell
 def _(
+    ANALYSIS_CONFIG,
     CONFIG,
     COUNTS_CSV,
     EXPERIMENT_ID,
@@ -1302,7 +1469,7 @@ def _(
     RESULTS_DIR,
     Sequence,
     datetime,
-    df_all,
+    df_all_with_counts,
     feature_columns,
     fully_missing_features,
     json,
@@ -1348,14 +1515,18 @@ def _(
             "plate_format": int(PLATE_FORMAT),
             "minimum_cells_per_well": int(MIN_CELLS_PER_WELL),
             "overwrite_existing_outputs": bool(CONFIG.overwrite_existing_outputs),
+            "analysis_mode": ANALYSIS_CONFIG.analysis_mode,
+            "included_plates": ANALYSIS_CONFIG.included_plates,
+            "excluded_plate_reasons": ANALYSIS_CONFIG.excluded_plate_reasons,
+            "required_reference_treatments": ANALYSIS_CONFIG.required_reference_treatments,
         },
         "dataset": {
-            "n_cells": int(df_all.shape[0]),
-            "n_columns": int(df_all.shape[1]),
+            "n_cells": int(df_all_with_counts.shape[0]),
+            "n_columns": int(df_all_with_counts.shape[1]),
             "n_features": int(len(feature_columns)),
-            "n_plates": int(df_all["Metadata_Plate"].nunique()),
+            "n_plates": int(df_all_with_counts["Metadata_Plate"].nunique()),
             "n_wells": int(
-                df_all[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
+                df_all_with_counts[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
             ),
             "n_low_count_wells": int(len(low_count_wells)),
             "n_fully_missing_features": int(len(fully_missing_features)),
@@ -1441,7 +1612,7 @@ def _(
     OUTPUT_PARQUET,
     Path,
     counts_df,
-    df_all,
+    df_all_with_counts,
     feature_columns,
     fully_missing_features,
     n_infinite,
@@ -1451,19 +1622,19 @@ def _(
 ):
     integrity_errors = []
 
-    if int(counts_df["n_cells"].sum()) != len(df_all):
-        integrity_errors.append("The sum of counts_df['n_cells'] does not equal len(df_all).")
+    if int(counts_df["n_cells"].sum()) != len(df_all_with_counts):
+        integrity_errors.append("The sum of counts_df['n_cells'] does not equal len(df_all_with_counts).")
 
-    df_plate_ids = set(df_all["Metadata_Plate"].astype(str))
+    df_plate_ids = set(df_all_with_counts["Metadata_Plate"].astype(str))
     count_plate_ids = set(counts_df["Metadata_Plate"].astype(str))
     if df_plate_ids != count_plate_ids:
-        integrity_errors.append("Plate identifiers differ between df_all and counts_df.")
+        integrity_errors.append("Plate identifiers differ between df_all_with_counts and counts_df.")
 
-    expected_wells = df_all[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
+    expected_wells = df_all_with_counts[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().shape[0]
     if len(counts_df) != expected_wells:
         integrity_errors.append(
             "The number of rows in counts_df does not equal the number of "
-            "unique plate/well combinations in df_all."
+            "unique plate/well combinations in df_all_with_counts."
         )
 
     required_outputs = [OUTPUT_PARQUET, OUTPUT_CSV, COUNTS_CSV, FEATURE_INTEGRITY_CSV, provenance_latest_path]
@@ -1487,7 +1658,7 @@ def _(
     print(f"  Experiment:          {EXPERIMENT_ID}")
     print(f"  Plates loaded:       {len(plate_dfs):,}")
     print(f"  Observed wells:      {len(counts_df):,}")
-    print(f"  Single cells:        {len(df_all):,}")
+    print(f"  Single cells:        {len(df_all_with_counts):,}")
     print(f"  Feature columns:     {len(feature_columns):,}")
     print(f"  Fully missing:       {len(fully_missing_features):,}")
     print(f"  Partially missing:   {len(partially_missing_features):,}")

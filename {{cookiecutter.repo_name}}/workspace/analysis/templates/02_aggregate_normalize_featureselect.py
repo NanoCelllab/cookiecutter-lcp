@@ -101,6 +101,7 @@ def _(Path):
     from hca_pipeline.config import SUPPORTED_PLATE_FORMATS, ExperimentConfig, validate_configuration
     from hca_pipeline.feature_select import infer_feature_cols, select_features
     from hca_pipeline.io import (
+        checkpoint_matches_plate_scope,
         resolve_resume_stage,
         validate_checkpoint_df,
         write_csv_protected,
@@ -108,6 +109,8 @@ def _(Path):
         write_summary_table_protected,
     )
     from hca_pipeline.metadata import (
+        CELL_COUNT_METADATA_COLUMN,
+        add_cell_count_metadata,
         annotate_per_plate,
         dedupe_meta,
         enforce_pascalcase_metadata_columns,
@@ -126,9 +129,12 @@ def _(Path):
 
     print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
     return (
+        CELL_COUNT_METADATA_COLUMN,
         ExperimentConfig,
         REPO_ROOT,
+        add_cell_count_metadata,
         annotate_per_plate,
+        checkpoint_matches_plate_scope,
         clean_features_before_normalization,
         dedupe_meta,
         drop_extreme_magnitude_features,
@@ -249,8 +255,8 @@ def _(loaded_config, mo):
         cv_warn_threshold_input,
         exclude_wells_input,
         mad_epsilon_input,
-        max_normalized_magnitude_input,
         max_missing_fraction_input,
+        max_normalized_magnitude_input,
         negcon_values_input,
         norm_control_input,
         overwrite_input,
@@ -362,7 +368,7 @@ def _(mo):
 
 
 @app.cell
-def _(INPUT_CSV, INPUT_PARQUET, dedupe_meta, ensure_core_metadata, pd):
+def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_core_metadata, pd):
     if INPUT_PARQUET.exists():
         df_loaded = pd.read_parquet(INPUT_PARQUET)
         print(f"  Loaded Parquet input: {INPUT_PARQUET}")
@@ -372,9 +378,45 @@ def _(INPUT_CSV, INPUT_PARQUET, dedupe_meta, ensure_core_metadata, pd):
     else:
         raise FileNotFoundError(f"Input file not found. Expected one of:\n  {INPUT_PARQUET}\n  {INPUT_CSV}")
 
-    df_loaded = dedupe_meta(ensure_core_metadata(df_loaded))
+    df_loaded = add_cell_count_metadata(dedupe_meta(ensure_core_metadata(df_loaded)))
     print(f"  Shape: {df_loaded.shape}")
     return (df_loaded,)
+
+
+@app.cell
+def _(CONFIG, df_loaded, pd):
+    available_plates = sorted(df_loaded[CONFIG.plate_col].dropna().astype(str).unique())
+    analysis_plates = CONFIG.resolve_plate_scope(available_plates)
+    df_analysis_scope = df_loaded.loc[
+        df_loaded[CONFIG.plate_col].astype(str).isin(analysis_plates)
+    ].copy()
+    if df_analysis_scope.empty:
+        raise ValueError("Plate selection produced an empty analysis dataset.")
+
+    excluded_plates = [plate for plate in available_plates if plate not in analysis_plates]
+    analysis_scope_summary = pd.DataFrame(
+        [
+            {
+                "Plate": plate,
+                "Included": plate in analysis_plates,
+                "Cells": int(df_loaded[CONFIG.plate_col].astype(str).eq(plate).sum()),
+                "Reason if excluded": CONFIG.excluded_plate_reasons.get(plate, ""),
+            }
+            for plate in available_plates
+        ]
+    )
+    print("═" * 72)
+    print(f"ANALYSIS SCOPE — {CONFIG.analysis_mode.upper()}")
+    print("═" * 72)
+    print(f"  Included plates: {len(analysis_plates)}/{len(available_plates)}")
+    for _plate in analysis_plates:
+        print(f"    ✓ {_plate}")
+    for _plate in excluded_plates:
+        print(f"    — {_plate}: {CONFIG.excluded_plate_reasons.get(_plate, 'no reason recorded')}")
+    if CONFIG.analysis_mode == "preliminary":
+        print("  ⚠️  Preliminary mode: downstream estimates are exploratory and may lack complete replication.")
+    analysis_scope_summary
+    return analysis_plates, analysis_scope_summary, df_analysis_scope, excluded_plates
 
 
 @app.cell
@@ -391,17 +433,24 @@ def _(mo):
 @app.cell
 def _(
     BARCODE_PLATEMAP_CSV,
+    CELL_COUNT_METADATA_COLUMN,
     PLATEMAP_DIR,
     SC_ANNOTATED_PARQUET,
+    add_cell_count_metadata,
     annotate_per_plate,
+    analysis_plates,
+    checkpoint_matches_plate_scope,
     dedupe_meta,
-    df_loaded,
+    df_analysis_scope,
     infer_feature_cols,
     read_barcode_platemap,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
-    if use_checkpoints_input.value and SC_ANNOTATED_PARQUET.exists():
+    _reuse_annotated = use_checkpoints_input.value and checkpoint_matches_plate_scope(
+        SC_ANNOTATED_PARQUET, analysis_plates
+    )
+    if _reuse_annotated:
         import pandas as _pd
 
         df_annotated = _pd.read_parquet(SC_ANNOTATED_PARQUET)
@@ -414,9 +463,17 @@ def _(
             raise FileNotFoundError(f"PLATEMAP_DIR not found: {PLATEMAP_DIR}")
 
         barcode_index = read_barcode_platemap(BARCODE_PLATEMAP_CSV)
-        df_annotated = dedupe_meta(annotate_per_plate(df_loaded, barcode_index, PLATEMAP_DIR))
+        if use_checkpoints_input.value and SC_ANNOTATED_PARQUET.exists():
+            print("  ℹ️  Invalidated annotated checkpoint because its plate scope changed")
+        df_annotated = dedupe_meta(annotate_per_plate(df_analysis_scope, barcode_index, PLATEMAP_DIR))
         df_annotated.to_parquet(SC_ANNOTATED_PARQUET, index=False)
         print(f"✓ Annotated and cached: {SC_ANNOTATED_PARQUET}")
+
+    _migrate_count_metadata = CELL_COUNT_METADATA_COLUMN not in df_annotated.columns
+    df_annotated = add_cell_count_metadata(df_annotated)
+    if _migrate_count_metadata:
+        df_annotated.to_parquet(SC_ANNOTATED_PARQUET, index=False)
+        print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to annotated checkpoint")
 
     print(f"  Shape: {df_annotated.shape}")
     return (df_annotated,)
@@ -459,8 +516,12 @@ def _(mo):
 @app.cell
 def _(
     BARCODE_PLATEMAP_CSV,
+    CELL_COUNT_METADATA_COLUMN,
     PLATEMAP_DIR,
     SC_READY_PARQUET,
+    add_cell_count_metadata,
+    analysis_plates,
+    checkpoint_matches_plate_scope,
     df_annotated,
     exclude_wells_input,
     find_wells_missing_from_layout,
@@ -471,13 +532,18 @@ def _(
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
-    if use_checkpoints_input.value and SC_READY_PARQUET.exists():
+    _reuse_ready = use_checkpoints_input.value and checkpoint_matches_plate_scope(
+        SC_READY_PARQUET, analysis_plates
+    )
+    if _reuse_ready:
         import pandas as _pd
 
         df_ready = _pd.read_parquet(SC_READY_PARQUET)
         validate_checkpoint_df(df_ready, "ready", infer_feature_cols(df_ready))
         print(f"✓ Reused checkpoint: {SC_READY_PARQUET}")
     else:
+        if use_checkpoints_input.value and SC_READY_PARQUET.exists():
+            print("  ℹ️  Invalidated ready checkpoint because its plate scope changed")
         barcode_index_for_exclusion = read_barcode_platemap(BARCODE_PLATEMAP_CSV)
         missing_pairs = find_wells_missing_from_layout(
             df_annotated, barcode_index_for_exclusion, PLATEMAP_DIR
@@ -511,6 +577,12 @@ def _(
         df_ready.to_parquet(SC_READY_PARQUET, index=False)
         print(f"  Removed {n_removed} rows → {df_ready.shape[0]:,} cells remaining")
         print(f"✓ Cached: {SC_READY_PARQUET}")
+
+    _migrate_count_metadata = CELL_COUNT_METADATA_COLUMN not in df_ready.columns
+    df_ready = add_cell_count_metadata(df_ready)
+    if _migrate_count_metadata:
+        df_ready.to_parquet(SC_READY_PARQUET, index=False)
+        print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to ready checkpoint")
     return (df_ready,)
 
 
@@ -524,20 +596,36 @@ def _(mo):
 
 @app.cell
 def _(
+    CELL_COUNT_METADATA_COLUMN,
     PW_AGGREGATED_PARQUET,
     RESOLVED_CONFIG,
+    analysis_plates,
+    checkpoint_matches_plate_scope,
     df_ready,
     infer_feature_cols,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
-    if use_checkpoints_input.value and PW_AGGREGATED_PARQUET.exists():
+    _reuse_aggregated = use_checkpoints_input.value and checkpoint_matches_plate_scope(
+        PW_AGGREGATED_PARQUET, analysis_plates, plate_col=RESOLVED_CONFIG.plate_col
+    )
+    if _reuse_aggregated:
         import pandas as _pd
 
         df_aggregated = _pd.read_parquet(PW_AGGREGATED_PARQUET)
+        if CELL_COUNT_METADATA_COLUMN not in df_aggregated.columns:
+            _well_keys = [RESOLVED_CONFIG.plate_col, RESOLVED_CONFIG.well_col]
+            _count_lookup = df_ready[_well_keys + [CELL_COUNT_METADATA_COLUMN]].drop_duplicates(_well_keys)
+            df_aggregated = df_aggregated.merge(
+                _count_lookup, on=_well_keys, how="left", validate="one_to_one"
+            )
+            df_aggregated.to_parquet(PW_AGGREGATED_PARQUET, index=False)
+            print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to aggregated checkpoint")
         validate_checkpoint_df(df_aggregated, "aggregated", infer_feature_cols(df_aggregated))
         print(f"✓ Reused checkpoint: {PW_AGGREGATED_PARQUET}")
     else:
+        if use_checkpoints_input.value and PW_AGGREGATED_PARQUET.exists():
+            print("  ℹ️  Invalidated aggregated checkpoint because its plate scope changed")
         _candidate_strata = [
             RESOLVED_CONFIG.plate_col,
             RESOLVED_CONFIG.well_col,
@@ -552,6 +640,7 @@ def _(
         # experiment has multiple cell lines), but when the platemap supplied
         # one it's real experiment metadata and must survive aggregation.
         _candidate_strata.append("Metadata_Cell_Type")
+        _candidate_strata.append(CELL_COUNT_METADATA_COLUMN)
         strata_cols = [c for c in _candidate_strata if c and c in df_ready.columns]
 
         agg_feature_cols = infer_feature_cols(df_ready)
@@ -603,9 +692,12 @@ def _(mo):
 
 @app.cell
 def _(
+    CELL_COUNT_METADATA_COLUMN,
     NORM_CONTROL,
     PW_NORMALIZED_PARQUET,
     RESOLVED_CONFIG,
+    analysis_plates,
+    checkpoint_matches_plate_scope,
     clean_features_before_normalization,
     df_aggregated,
     drop_extreme_magnitude_features,
@@ -619,13 +711,26 @@ def _(
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
-    if use_checkpoints_input.value and PW_NORMALIZED_PARQUET.exists():
+    _reuse_normalized = use_checkpoints_input.value and checkpoint_matches_plate_scope(
+        PW_NORMALIZED_PARQUET, analysis_plates, plate_col=RESOLVED_CONFIG.plate_col
+    )
+    if _reuse_normalized:
         import pandas as _pd
 
         df_normalized = _pd.read_parquet(PW_NORMALIZED_PARQUET)
+        if CELL_COUNT_METADATA_COLUMN not in df_normalized.columns:
+            _well_keys = [RESOLVED_CONFIG.plate_col, RESOLVED_CONFIG.well_col]
+            _count_lookup = df_aggregated[_well_keys + [CELL_COUNT_METADATA_COLUMN]].drop_duplicates(_well_keys)
+            df_normalized = df_normalized.merge(
+                _count_lookup, on=_well_keys, how="left", validate="one_to_one"
+            )
+            df_normalized.to_parquet(PW_NORMALIZED_PARQUET, index=False)
+            print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to normalized checkpoint")
         validate_checkpoint_df(df_normalized, "normalized", infer_feature_cols(df_normalized), strict=True)
         print(f"✓ Reused checkpoint: {PW_NORMALIZED_PARQUET}")
     else:
+        if use_checkpoints_input.value and PW_NORMALIZED_PARQUET.exists():
+            print("  ℹ️  Invalidated normalized checkpoint because its plate scope changed")
         pre_norm_feature_cols = infer_feature_cols(df_aggregated)
         df_cleaned, cleaned_feature_cols, clean_summary = clean_features_before_normalization(
             df_aggregated, pre_norm_feature_cols, max_missing_fraction=float(max_missing_fraction_input.value),
@@ -690,7 +795,12 @@ def _(mo):
 
 
 @app.cell
-def _(clean_features_before_normalization, df_aggregated, infer_feature_cols, max_missing_fraction_input):
+def _(
+    clean_features_before_normalization,
+    df_aggregated,
+    infer_feature_cols,
+    max_missing_fraction_input,
+):
     # Cleaned-but-not-yet-normalized view of the aggregated data, used only for
     # SC-08's "before normalization" panel below -- comparing PCA against the
     # raw aggregated data (which can still contain inf/NaN) would crash
@@ -770,6 +880,7 @@ def _(
     FIGS_DIR,
     RESOLVED_CONFIG,
     WITHIN_GROUP_VARIABILITY_CSV,
+    analysis_plates,
     corr_warn_threshold_input,
     cv_warn_threshold_input,
     df_normalized,
@@ -868,8 +979,11 @@ def _(mo):
 
 @app.cell
 def _(
+    CELL_COUNT_METADATA_COLUMN,
     OVERWRITE_EXISTING_OUTPUTS,
     PW_FEATURES_SELECTED_PARQUET,
+    analysis_plates,
+    checkpoint_matches_plate_scope,
     df_normalized,
     enforce_pascalcase_metadata_columns,
     feat_cols_norm,
@@ -879,15 +993,28 @@ def _(
     validate_checkpoint_df,
     write_parquet_protected,
 ):
-    if use_checkpoints_input.value and PW_FEATURES_SELECTED_PARQUET.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+    _feature_scope_matches = checkpoint_matches_plate_scope(
+        PW_FEATURES_SELECTED_PARQUET, analysis_plates
+    )
+    if use_checkpoints_input.value and _feature_scope_matches and not OVERWRITE_EXISTING_OUTPUTS:
         import pandas as _pd
 
         df_feature_selected = _pd.read_parquet(PW_FEATURES_SELECTED_PARQUET)
+        if CELL_COUNT_METADATA_COLUMN not in df_feature_selected.columns:
+            _well_keys = ["Metadata_Plate", "Metadata_Well"]
+            _count_lookup = df_normalized[_well_keys + [CELL_COUNT_METADATA_COLUMN]].drop_duplicates(_well_keys)
+            df_feature_selected = df_feature_selected.merge(
+                _count_lookup, on=_well_keys, how="left", validate="one_to_one"
+            )
+            df_feature_selected.to_parquet(PW_FEATURES_SELECTED_PARQUET, index=False)
+            print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to feature-selected checkpoint")
         validate_checkpoint_df(
             df_feature_selected, "feature_selected", infer_feature_cols(df_feature_selected), strict=True,
         )
         print(f"✓ Reused checkpoint: {PW_FEATURES_SELECTED_PARQUET}")
     else:
+        if use_checkpoints_input.value and PW_FEATURES_SELECTED_PARQUET.exists() and not _feature_scope_matches:
+            print("  ℹ️  Invalidated feature-selected checkpoint because its plate scope changed")
         n_before = len(feat_cols_norm)
         df_feature_selected = select_features(df_normalized, "infer")
         final_feature_cols = infer_feature_cols(df_feature_selected)
@@ -911,13 +1038,20 @@ def _(
         if int(final_values.isna().sum().sum()) > 0:
             raise ValueError("The final feature matrix still contains missing/inf values.")
 
-        required_meta = ["Metadata_Plate", "Metadata_Well", "Metadata_Treatment"]
+        required_meta = [
+            "Metadata_Plate",
+            "Metadata_Well",
+            "Metadata_Treatment",
+            CELL_COUNT_METADATA_COLUMN,
+        ]
         missing_meta = [c for c in required_meta if c not in df_feature_selected.columns]
         if missing_meta:
             raise ValueError(f"Required metadata columns missing: {missing_meta}")
 
         export_status = write_parquet_protected(
-            df_feature_selected, PW_FEATURES_SELECTED_PARQUET, overwrite=OVERWRITE_EXISTING_OUTPUTS
+            df_feature_selected,
+            PW_FEATURES_SELECTED_PARQUET,
+            overwrite=OVERWRITE_EXISTING_OUTPUTS or not _feature_scope_matches,
         )
         print(f"✓ Feature-selected profile {export_status}: {PW_FEATURES_SELECTED_PARQUET}")
     return (df_feature_selected,)
@@ -993,10 +1127,15 @@ def _(
             "treatment_col": CONFIG.treatment_col,
             "concentration_col": CONFIG.concentration_col,
             "has_dose_axis": CONFIG.has_dose_axis,
+            "analysis_mode": CONFIG.analysis_mode,
+            "included_plates": analysis_plates,
+            "excluded_plate_reasons": CONFIG.excluded_plate_reasons,
+            "required_reference_treatments": CONFIG.required_reference_treatments,
         },
         "dataset": {
             "n_wells": int(df_feature_selected.shape[0]),
             "n_features": int(len(feat_cols_final)),
+            "n_plates": int(df_feature_selected[CONFIG.plate_col].nunique()),
         },
         "version_control": {
             "git_commit": (run_git_command(["rev-parse", "HEAD"], REPO_ROOT) or "unknown"),
