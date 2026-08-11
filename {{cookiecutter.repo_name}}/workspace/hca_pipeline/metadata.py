@@ -54,23 +54,50 @@ def ensure_core_metadata(
     return df
 
 
-def dedupe_meta(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicated Metadata_Plate/Well/Site columns after a merge.
+# Matches a duplicated Metadata_* column's suffix, from either of two
+# sources: an explicit pandas ``merge`` of two frames that both carry the
+# same metadata column (``Metadata_Plate_x``/``Metadata_Plate_y``), or a
+# source CSV whose header already repeated an entire metadata block --
+# typical of CellProfiler exports that horizontally merge per-compartment
+# (Nuclei/Cytoplasm/Cells) tables without dropping each one's own copy of
+# Plate/Well/Site/QCFlag. pandas silently re-labels the latter as
+# ``Metadata_Plate.1``, ``Metadata_Plate.2``, ... on read to keep column
+# names unique; left alone, those ride along into every downstream file as
+# distinct-looking but fully redundant columns.
+_META_DUPLICATE_SUFFIX_RE = re.compile(r"^(Metadata_.+?)(?:_[xy]\d*|(?:\.\d+)+)$")
 
-    When two frames both carry the same metadata column, the merge can
-    produce ``Metadata_Plate_x``/``Metadata_Plate_y``-style duplicates; this
-    coalesces them into one column (first non-null wins) and moves the
-    metadata columns to the front.
+
+def dedupe_meta(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicated Metadata_* columns into one per logical name.
+
+    Groups every ``Metadata_*`` column by its base name (suffix stripped),
+    coalesces each group by "first non-null wins" (preferring the
+    unsuffixed name as the surviving column when present), and moves
+    Plate/Well/Site to the front.
     """
-    meta_keys = ["Metadata_Plate", "Metadata_Well", "Metadata_Site"]
     df = df.loc[:, ~df.columns.duplicated()].copy()
-    for key in meta_keys:
-        cols = [c for c in df.columns if c == key or c.startswith(key + "_")]
-        if len(cols) > 1:
-            base = cols[0]
-            for extra in cols[1:]:
-                df[base] = df[base].where(df[base].notna(), df[extra])
-                df.drop(columns=extra, inplace=True, errors="ignore")
+
+    groups: dict[str, list[str]] = {}
+    for col in df.columns:
+        if not col.startswith("Metadata_"):
+            continue
+        match = _META_DUPLICATE_SUFFIX_RE.match(col)
+        base = match.group(1) if match else col
+        groups.setdefault(base, []).append(col)
+
+    for base, cols in groups.items():
+        if len(cols) <= 1:
+            continue
+        target = base if base in cols else cols[0]
+        for extra in cols:
+            if extra == target:
+                continue
+            df[target] = df[target].where(df[target].notna(), df[extra])
+            df.drop(columns=extra, inplace=True)
+        if target != base:
+            df = df.rename(columns={target: base})
+
+    meta_keys = ["Metadata_Plate", "Metadata_Well", "Metadata_Site"]
     meta_first = [c for c in meta_keys if c in df.columns]
     return df[meta_first + [c for c in df.columns if c not in meta_first]]
 
@@ -125,8 +152,18 @@ def read_platemap_layout(csv_path: Path) -> pd.DataFrame:
         pm["Metadata_Cell_Type"] = pm["Cell_Type"]
     if "Time_Point" in pm.columns:
         pm["Metadata_Time"] = pm["Time_Point"]
-    pm["plate_map_name"] = pm["plate_map_name"].astype(str).str.strip()
-    return pm
+
+    # Drop the raw, un-prefixed source columns now that each has a
+    # Metadata_-prefixed counterpart (`annotate_per_plate` merges this
+    # frame's columns wholesale onto the profile data -- leaving these in
+    # would carry a second, un-prefixed copy of Treatment/Control_Type/
+    # Cell_Type/Concentration into every downstream file). `plate_map_name`
+    # has no Metadata_ counterpart and isn't used past this function; it's
+    # dropped rather than promoted since nothing downstream needs it.
+    return pm.drop(
+        columns=["Treatment", "Control_Type", "Cell_Type", "Time_Point", "Concentration", "plate_map_name"],
+        errors="ignore",
+    )
 
 
 def annotate_per_plate(

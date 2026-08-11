@@ -44,8 +44,10 @@ rich = "13.*"
 [pypi-dependencies]
 pycytominer = ">=0.3"
 copairs = ">=0.5,<0.6"
+inmoose = ">=0.9,<1"
 
 [tasks]
 lab = "jupyter lab"
 check = "python scripts/check_environment.py"
 export-report = "python3 workspace/hca_pipeline/report_export.py"
+schema-check = "python3 workspace/hca_pipeline/schema.py"

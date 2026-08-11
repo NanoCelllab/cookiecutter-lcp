@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.16"
+__generated_with = "0.23.15"
 app = marimo.App(width="medium")
 
 
@@ -141,6 +141,7 @@ def _(Path):
     from hca_pipeline.metadata import (
         norm_well,
         ensure_core_metadata,
+        dedupe_meta,
         read_barcode_platemap,
         read_platemap_layout,
     )
@@ -152,6 +153,7 @@ def _(Path):
         ExperimentConfig,
         REPO_ROOT,
         SUPPORTED_PLATE_FORMATS,
+        dedupe_meta,
         ensure_core_metadata,
         infer_feature_cols,
         norm_well,
@@ -334,6 +336,7 @@ def _(EXPERIMENT_ID, REPO_ROOT):
         OUTPUT_CSV,
         OUTPUT_PARQUET,
         RESULTS_DIR,
+        WORKSPACE_DIR,
     )
 
 
@@ -368,7 +371,7 @@ def _(DB_ROOT):
 
 
 @app.cell
-def _(Path, ensure_core_metadata, norm_well, pd):
+def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd):
     def read_legacy_single_cell_csv(csv_path: Path) -> pd.DataFrame:
         """Read and validate a previously generated single-cell profile CSV.
 
@@ -416,6 +419,20 @@ def _(Path, ensure_core_metadata, norm_well, pd):
             print("  Metadata:  standardized core metadata column names")
         else:
             print("  Metadata:  core metadata columns already standardized")
+
+        # Some CellProfiler exports merge per-compartment (Nuclei/Cytoplasm/
+        # Cells) tables without dropping each one's own copy of
+        # Plate/Well/Site/QCFlag -- pandas silently re-labels the repeats as
+        # Metadata_Plate.1, Metadata_Plate.2, ... on read. Collapsing them
+        # here, at the source, keeps every downstream parquet file free of
+        # them rather than relying on each consumer to clean up after itself.
+        _n_columns_before_dedupe = df.shape[1]
+        df = dedupe_meta(df)
+        _n_duplicates_removed = _n_columns_before_dedupe - df.shape[1]
+        if _n_duplicates_removed:
+            print(f"  Metadata:  collapsed {_n_duplicates_removed} duplicated metadata column(s)")
+        else:
+            print("  Metadata:  no duplicated metadata columns detected")
 
         required_metadata = ["Metadata_Plate", "Metadata_Well"]
         missing_metadata = [c for c in required_metadata if c not in df.columns]
@@ -780,8 +797,8 @@ def _(Normalize, Path, np, patches, pd, plt, re):
         vmax: float | None = None,
         smooth_image: bool = False,
         well_treatments: dict[str, str] | None = None,
-    ) -> None:
-        """Plot a publication-friendly plate map of cell counts per well.
+    ) -> plt.Figure | None:
+        """Plot and return a publication-friendly plate map of cell counts per well.
 
         Wells below `min_cells` are outlined and marked with a warning symbol.
         `smooth_image=True` renders the heatmap with smoothed (blurred)
@@ -1007,11 +1024,10 @@ def _(Normalize, Path, np, patches, pd, plt, re):
 
         fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
         fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
-
         print(f"  ✓  {plate_id}: plate map saved ({n_observed} observed wells; {n_low} below threshold)")
         print(f"     PNG: {png_path.name}")
         print(f"     PDF: {pdf_path.name}")
+        return fig
 
     return (plot_cell_count_heatmap,)
 
@@ -1022,9 +1038,10 @@ def _(
     MIN_CELLS_PER_WELL,
     PLATE_FORMAT,
     blur_plate_maps_input,
+    mo,
     plate_dfs,
     plot_cell_count_heatmap,
-    well_treatments_by_plate,
+    well_treatments_by_plate: dict[str, dict[str, str]],
 ):
     global_max = max(
         df_plate.groupby("Metadata_Well", observed=True).size().max()
@@ -1036,8 +1053,9 @@ def _(
     print("═" * 72)
     print(f"  Shared color-scale maximum: {global_max:,.0f} cells per well\n")
 
+    plate_map_figures = []
     for _plate_id, _df_plate in plate_dfs.items():
-        plot_cell_count_heatmap(
+        _figure = plot_cell_count_heatmap(
             df_plate=_df_plate,
             plate_id=_plate_id,
             out_dir=FIGS_DIR,
@@ -1047,6 +1065,10 @@ def _(
             smooth_image=blur_plate_maps_input.value,
             well_treatments=well_treatments_by_plate.get(_plate_id),
         )
+        if _figure is not None:
+            plate_map_figures.append(_figure)
+
+    mo.vstack(plate_map_figures)
     return
 
 
@@ -1058,6 +1080,7 @@ def _(mo):
     `counts_df` contains one row per plate/well combination.
     """)
     return
+
 
 @app.cell
 def _(MIN_CELLS_PER_WELL, df_all, pd):

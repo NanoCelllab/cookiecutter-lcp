@@ -345,7 +345,8 @@ def _(FIGS_DIR, RESOLVED_CONFIG, df_sc, plt, sns):
     fig_sc14, ax_sc14 = plt.subplots(figsize=(10, 5))
     sns.violinplot(
         data=counts_per_well, x=RESOLVED_CONFIG.treatment_col, y="n_cells",
-        order=_order, palette="tab10", ax=ax_sc14, inner="box", cut=0,
+        hue=RESOLVED_CONFIG.treatment_col, order=_order, hue_order=_order,
+        palette="tab10", legend=False, ax=ax_sc14, inner="box", cut=0,
     )
     ax_sc14.set_xlabel("Treatment")
     ax_sc14.set_ylabel("Cells per well")
@@ -945,11 +946,6 @@ def _():
     import subprocess
 
     return json, platform, subprocess
-
-
-@app.cell
-def _():
-    return
 
 
 @app.cell

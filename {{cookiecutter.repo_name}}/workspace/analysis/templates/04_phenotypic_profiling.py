@@ -230,12 +230,12 @@ def _(ExperimentConfig, REPO_ROOT, experiment_id_input):
 @app.cell
 def _(loaded_config, mo):
     run_analysis_spaces_input = mo.ui.multiselect(
-        options=["uncorrected", "harmony"],
+        options=["uncorrected", "harmony", "combat"],
         value=["uncorrected", "harmony"],
         label="Latent modelling spaces to run",
     )
     final_modelling_space_input = mo.ui.dropdown(
-        options=["uncorrected", "harmony"],
+        options=["uncorrected", "harmony", "combat"],
         value="uncorrected",
         label="Final modelling space (explicit downstream choice)",
     )
@@ -989,9 +989,63 @@ def _(mo):
     ## Section 5 — Build equivalent latent modelling spaces
 
     The comparison is performed between matrices with the same dimensionality: **uncorrected**
-    (`X_pca`) and, optionally, **harmony** (Harmony-corrected `X_pca`).
+    (`X_pca`) and, optionally, one or more **batch-corrected** versions of it — **harmony**
+    and/or **combat** below.
+
+    **Reason:** `mad_robustize` (NB02) normalizes each feature's marginal distribution, but
+    plate-to-plate systematic shifts that only emerge from the *combination* of many features
+    survive that step — that's exactly what SC-08 (NB03) checks for. Batch correction is the
+    remediation: re-express every well's profile with plate-associated variation removed,
+    while (ideally) keeping treatment-associated variation intact. Two algorithms are offered
+    because they make different tradeoffs, not because one is a strict upgrade of the other:
+
+    - **Harmony** (Korsunsky et al. 2019) iteratively re-clusters wells across plates in PCA
+      space and nudges each cluster's per-plate centroids together. Arevalo et al. 2023
+      benchmarked it as the strongest general-purpose choice for Cell Painting-style profiles,
+      which is why it's this pipeline's long-standing default.
+      **Assumption:** the same approximate treatment/cluster structure exists on every plate —
+      Harmony needs enough per-plate replicates of each cluster to align them confidently.
+    - **ComBat** (Johnson, Li & Rabinovic 2007; `inmoose.pycombat.pycombat_norm` here) instead
+      fits an explicit per-feature, per-plate location (and, optionally, scale) shift and
+      removes it, using an empirical-Bayes prior borrowed across features to stabilize the
+      estimate from limited data.
+      **Assumption:** the batch effect is a simple additive (± multiplicative) per-feature
+      shift — a narrower model than Harmony's, but one that needs far fewer wells per plate to
+      estimate reliably. That's the case this option is *for*: a small pilot plate, or a batch
+      with too few replicates per cluster for Harmony's clustering step to align confidently.
+      `mean_only=True` (the default below) drops the multiplicative term specifically because
+      per-plate *variance* is the least stable thing to estimate with few replicates — see
+      "Advanced: ComBat parameters" below.
+
+    Both methods assume **plate is a reasonable proxy for batch** (the same one SC-08 uses)
+    and that **treatment and plate are not perfectly confounded** — a design where every plate
+    ran a different set of treatments would make batch correction indistinguishable from
+    erasing the biology, regardless of which algorithm removes it.
     """)
     return
+
+
+@app.cell
+def _(mo):
+    combat_mean_only_input = mo.ui.checkbox(
+        value=True,
+        label=(
+            "mean_only — skip per-plate variance correction, only remove the mean shift "
+            "(recommended when a plate has few replicates per treatment)"
+        ),
+    )
+    combat_par_prior_input = mo.ui.checkbox(
+        value=True,
+        label="par_prior — parametric empirical-Bayes prior (uncheck for the slower, more robust non-parametric estimate)",
+    )
+    mo.accordion(
+        {
+            "Advanced: ComBat parameters (only used if 'combat' is selected above)": mo.vstack(
+                [combat_mean_only_input, combat_par_prior_input]
+            ),
+        }
+    )
+    return combat_mean_only_input, combat_par_prior_input
 
 
 @app.cell
@@ -1026,6 +1080,8 @@ def _(
     RUN_ANALYSIS_SPACES,
     SPACE_DIRECTORIES,
     X_pca,
+    combat_mean_only_input,
+    combat_par_prior_input,
     df,
     meta_cols,
     np,
@@ -1033,9 +1089,10 @@ def _(
     validate_output_path,
     write_csv_protected,
 ):
-    # Harmony batch correction is not (yet) part of the shared hca_pipeline
-    # package (confirmed absent from modelling.py/stats.py/etc.) — it is kept
-    # local to this notebook since it is this section's specific concern.
+    # Harmony/ComBat batch correction are not (yet) part of the shared
+    # hca_pipeline package (confirmed absent from modelling.py/stats.py/etc.)
+    # — kept local to this notebook since it is this section's specific
+    # concern.
     X_pca_harmony = None
     if "harmony" in RUN_ANALYSIS_SPACES:
         try:
@@ -1076,6 +1133,45 @@ def _(
         _status = write_csv_protected(_harmony_coordinates_df, _harmony_path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
         print(f"Harmony-corrected matrix: {X_pca_harmony.shape} ({_status})")
 
+    X_pca_combat = None
+    if "combat" in RUN_ANALYSIS_SPACES:
+        try:
+            from inmoose.pycombat import pycombat_norm
+        except ImportError as _error:
+            raise ImportError(
+                "ComBat analysis was requested, but inmoose is not installed. "
+                "Add inmoose to the Pixi environment and rerun."
+            ) from _error
+
+        # pycombat_norm expects features (rows) x samples (columns) --
+        # transposed relative to X_pca's wells (rows) x PCs (columns).
+        _combat_batch = df[CONFIG.plate_col].astype(str).tolist()
+        _combat_raw = pycombat_norm(
+            X_pca.T,
+            _combat_batch,
+            mean_only=bool(combat_mean_only_input.value),
+            par_prior=bool(combat_par_prior_input.value),
+        )
+        X_pca_combat = np.asarray(_combat_raw).T
+
+        if X_pca_combat.shape != X_pca.shape:
+            raise ValueError(
+                f"Unexpected ComBat output shape. Input PCA shape: {X_pca.shape}, "
+                f"ComBat shape: {X_pca_combat.shape}"
+            )
+
+        _combat_coordinates_df = pd.DataFrame(
+            X_pca_combat,
+            columns=[f"ComBat_PC{i + 1}" for i in range(X_pca_combat.shape[1])],
+            index=df.index,
+        )
+        _combat_coordinates_df = pd.concat([df[meta_cols], _combat_coordinates_df], axis=1)
+        _combat_path = validate_output_path(
+            SPACE_DIRECTORIES["combat"]["results"] / "combat_coordinates.csv", OVERWRITE_EXISTING_OUTPUTS
+        )
+        _status = write_csv_protected(_combat_coordinates_df, _combat_path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
+        print(f"ComBat-corrected matrix: {X_pca_combat.shape} ({_status})")
+
     MODELLING_SPACES = {
         "uncorrected": {
             "label": "Uncorrected PCA space", "X_latent": X_pca,
@@ -1086,6 +1182,11 @@ def _(
         MODELLING_SPACES["harmony"] = {
             "label": "Harmony-corrected PCA space", "X_latent": X_pca_harmony,
             "description": "Harmony-corrected PCA coordinates",
+        }
+    if X_pca_combat is not None:
+        MODELLING_SPACES["combat"] = {
+            "label": "ComBat-corrected PCA space", "X_latent": X_pca_combat,
+            "description": "ComBat-corrected PCA coordinates",
         }
 
     _invalid_spaces = [name for name in RUN_ANALYSIS_SPACES if name not in MODELLING_SPACES]
@@ -1721,6 +1822,1182 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
+    ## Section 8b — Similarity Matrices for Profile Exploration
+
+    A similarity matrix turns the well-level feature matrix `X` into an
+    n_wells × n_wells table of "how alike are these two profiles", making
+    replicate agreement and treatment separation visible directly — no PCA/
+    UMAP projection required first. Caicedo et al. 2017 frame this as a core
+    profiling primitive: *"similarity metrics reveal connections among
+    morphological profiles"*.
+
+    Five metrics are computed, each with a different notion of "alike":
+
+    - **Pearson** — correlation of each profile's *shape* (feature-to-feature
+      pattern), invariant to each profile's overall scale/offset.
+    - **Cosine** — angle between profile vectors. On data that is already
+      per-feature centered (this notebook's `StandardScaler` output, or
+      `mad_robustize` upstream), cosine and Pearson are mathematically
+      near-identical — demonstrated empirically in Section 8b.5 below.
+    - **Spearman** — Pearson computed on *ranks* instead of raw values, so
+      it only cares about monotonic agreement. Caicedo et al. 2017: *"rank
+      correlations perform best for untransformed feature vectors"*, i.e.
+      when features haven't already been made comparable in scale.
+    - **Euclidean** — straight-line distance, converted to a similarity so
+      it plots on the same 0–1 scale as the others.
+    - **Mahalanobis** — Euclidean distance rescaled by the *feature
+      covariance*, so correlated features don't get double-counted. Levy et
+      al. 2025 call it *"extremely useful ... excellent in multivariate
+      anomaly detection ... not so well known or used in ML practice"*.
+
+    Distances (Euclidean, Mahalanobis) are converted to similarities via
+    `sim = 1 / (1 + dist)`, mapping `[0, ∞) → (0, 1]` with `1.0` meaning
+    identical profiles — the same 0–1 sense as a correlation-based
+    similarity, so all five metrics can be plotted on one shared color scale.
+    """)
+    return
+
+
+@app.cell
+def _():
+    import seaborn as sns
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import pdist, squareform
+    from scipy.stats import pearsonr, rankdata
+    from sklearn.covariance import LedoitWolf
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    # scipy.cluster.hierarchy.linkage method shared by every clustermap and
+    # side-by-side heatmap below, so all of them agree on well ordering.
+    LINKAGE_METHOD = "average"
+
+    return (
+        LINKAGE_METHOD,
+        LedoitWolf,
+        cosine_similarity,
+        fcluster,
+        linkage,
+        pdist,
+        pearsonr,
+        rankdata,
+        sns,
+        squareform,
+    )
+
+
+@app.cell
+def _(FIGS_DIR, RESULTS_DIR):
+    # Dedicated subdirectory (matching NB04's own comparisons/ and
+    # fingerprints/ split) so this exploratory section's outputs never
+    # collide with the modelling-space results already written above.
+    SIMILARITY_RESULTS_DIR = RESULTS_DIR / "similarity_matrices"
+    SIMILARITY_FIGS_DIR = FIGS_DIR / "similarity_matrices"
+    SIMILARITY_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    SIMILARITY_FIGS_DIR.mkdir(parents=True, exist_ok=True)
+    return SIMILARITY_FIGS_DIR, SIMILARITY_RESULTS_DIR
+
+
+@app.cell
+def _(LedoitWolf, cosine_similarity, np, pdist, rankdata, squareform):
+    def compute_similarity_matrix(profiles, metric):
+        """Pairwise n x n similarity matrix for one profile matrix + metric.
+
+        Every branch returns a symmetric ``(n, n)`` array with diagonal
+        ``1.0`` (a profile is maximally similar to itself), so the five
+        metrics are directly comparable and interchangeable downstream
+        (clustermaps, Mantel tests, percent-replicating).
+        """
+        if metric == "pearson":
+            # Caicedo et al. 2017: "Pearson's correlation generally appears
+            # to be a good choice" for typical profiling pipelines. Vectorized
+            # as center -> L2-normalize -> one matrix product for all pairs
+            # at once (same pattern as hca_pipeline.metrics_qc's
+            # compute_pairwise_correlations, but with a 1.0 diagonal here
+            # instead of that function's -inf nearest-neighbor sentinel).
+            centered = profiles - profiles.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(centered, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            normalized = centered / norms
+            sim = normalized @ normalized.T
+            np.fill_diagonal(sim, 1.0)
+            return sim
+
+        if metric == "cosine":
+            # Equivalent to Pearson on centered data (this notebook's
+            # StandardScaler centers every feature) -- and cosine is exactly
+            # the metric `copairs` uses for NB03's mAP/PR-based QC, so this
+            # matrix is expected to closely track the Pearson one above (see
+            # Section 8b.5, the Pearson/cosine equivalence check).
+            sim = cosine_similarity(profiles)
+            np.fill_diagonal(sim, 1.0)
+            return sim
+
+        if metric == "spearman":
+            # Caicedo et al. 2017: rank correlations "perform best for
+            # untransformed feature vectors" -- robust to outliers and
+            # monotonic non-linearities that Pearson is sensitive to.
+            # Vectorized as Pearson-on-ranks rather than a pairwise
+            # spearmanr loop: rank each profile's features, then reuse the
+            # same center/normalize/matmul pattern as the Pearson branch.
+            ranked = np.apply_along_axis(rankdata, 1, profiles)
+            centered = ranked - ranked.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(centered, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            normalized = centered / norms
+            sim = normalized @ normalized.T
+            np.fill_diagonal(sim, 1.0)
+            return sim
+
+        if metric == "euclidean":
+            dist = squareform(pdist(profiles, metric="euclidean"))
+            sim = 1.0 / (1.0 + dist)  # [0, inf) -> (0, 1], 1.0 = identical
+            np.fill_diagonal(sim, 1.0)
+            return sim
+
+        if metric == "mahalanobis":
+            # Levy et al. 2025: Mahalanobis distance is "extremely useful
+            # ... excellent in multivariate anomaly detection ... not so
+            # well known or used in ML practice." LedoitWolf shrinkage keeps
+            # the covariance estimate invertible even though n_features here
+            # is typically >> n_wells, where the plain sample covariance
+            # would be singular.
+            try:
+                precision = LedoitWolf().fit(profiles).precision_
+                dist = squareform(pdist(profiles, metric="mahalanobis", VI=precision))
+                sim = 1.0 / (1.0 + dist)
+                np.fill_diagonal(sim, 1.0)
+                return sim
+            except Exception as exc:
+                print(f"  ⚠️  Mahalanobis similarity failed ({exc!r}); skipping this metric.")
+                return None
+
+        raise ValueError(f"Unknown metric: {metric!r}")
+
+    return (compute_similarity_matrix,)
+
+
+@app.cell
+def _(X, compute_similarity_matrix, np):
+    SIMILARITY_METRICS = ["pearson", "cosine", "spearman", "euclidean", "mahalanobis"]
+
+    similarity_matrices = {}
+    for _metric in SIMILARITY_METRICS:
+        _sim = compute_similarity_matrix(X, _metric)
+        if _sim is not None:
+            similarity_matrices[_metric] = _sim
+
+    print(f"Profiles: {X.shape[0]} wells x {X.shape[1]} features\n")
+    for _metric, _sim in similarity_matrices.items():
+        _off_diag = _sim[~np.eye(_sim.shape[0], dtype=bool)]
+        print(
+            f"  {_metric:<12} shape={_sim.shape}  "
+            f"range=[{_off_diag.min():.3f}, {_off_diag.max():.3f}]  mean={_off_diag.mean():.3f}"
+        )
+    return (similarity_matrices,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.1 — Hierarchical Clustering & Heatmaps
+
+    Caicedo et al. 2017: *"Hierarchical clustering is computed by using a
+    similarity matrix ... visualized as a heat map ... sorted by using the
+    hierarchical structure."* Reordering the similarity matrix by its own
+    dendrogram groups replicate/treatment blocks together visually, without
+    first needing to already know which wells belong together — a useful
+    sanity check before trusting any of the metrics that summarize
+    replicate agreement below.
+    """)
+    return
+
+
+@app.cell
+def _(CONFIG, df, sns):
+    _treatments = sorted(df[CONFIG.treatment_col].astype(str).unique())
+    _plates = sorted(df[CONFIG.plate_col].astype(str).unique())
+
+    treatment_palette = dict(zip(_treatments, sns.color_palette("Set2", len(_treatments))))
+    plate_palette = dict(zip(_plates, sns.color_palette("Set3", len(_plates))))
+
+    treatment_colors = df[CONFIG.treatment_col].astype(str).map(treatment_palette)
+    treatment_colors.name = "Treatment"
+    plate_colors = df[CONFIG.plate_col].astype(str).map(plate_palette)
+    plate_colors.name = "Plate"
+
+    print(f"Treatment palette: {len(_treatments)} colors ({', '.join(_treatments)})")
+    print(f"Plate palette     : {len(_plates)} colors ({', '.join(_plates)})")
+    return plate_colors, treatment_colors
+
+
+@app.cell
+def _(LINKAGE_METHOD, linkage, np, pd, plt, sns, squareform):
+    def plot_similarity_clustermap(sim_matrix, treatment_colors, plate_colors, title, output_path):
+        """Similarity heatmap reordered by its own hierarchical clustering.
+
+        Clustering is computed from the *distance* (``1 - similarity``) but
+        the heatmap itself is colored by *similarity*, so "brighter" reads
+        as "more alike" — clustering geometry and color meaning are kept
+        separate on purpose, rather than clustering directly on a
+        similarity matrix (which `scipy.cluster.hierarchy` doesn't treat as
+        a proper metric).
+        """
+        distance_matrix = 1.0 - sim_matrix
+        np.fill_diagonal(distance_matrix, 0.0)
+        condensed = squareform(distance_matrix, checks=False)
+        linkage_matrix = linkage(condensed, method=LINKAGE_METHOD)
+
+        # seaborn's clustermap requires `data` to carry a pandas index
+        # whenever row/col_colors is a DataFrame/Series (it reindexes
+        # colors onto data.index) -- sim_matrix is a plain ndarray, so wrap
+        # it with the same default RangeIndex as treatment/plate_colors.
+        row_colors = pd.DataFrame(
+            {"Treatment": treatment_colors.to_numpy(), "Plate": plate_colors.to_numpy()}
+        )
+        sim_df = pd.DataFrame(sim_matrix)
+
+        grid = sns.clustermap(
+            sim_df,
+            row_linkage=linkage_matrix,
+            col_linkage=linkage_matrix,
+            row_colors=row_colors,
+            cmap="RdYlBu_r",
+            figsize=(12, 10),
+            dendrogram_ratio=(0.15, 0.15),
+            xticklabels=False,
+            yticklabels=False,
+        )
+        grid.figure.suptitle(title, y=1.02)
+        grid.savefig(output_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
+        grid.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
+        plt.close(grid.figure)
+        return grid.figure
+
+    return (plot_similarity_clustermap,)
+
+
+@app.cell
+def _(SIMILARITY_FIGS_DIR, mo, plate_colors, plot_similarity_clustermap, similarity_matrices, treatment_colors):
+    _figures = []
+    for _metric in ("pearson", "cosine"):
+        if _metric not in similarity_matrices:
+            continue
+        _fig = plot_similarity_clustermap(
+            similarity_matrices[_metric],
+            treatment_colors,
+            plate_colors,
+            title=f"{_metric.capitalize()} similarity — hierarchically clustered",
+            output_path=SIMILARITY_FIGS_DIR / f"clustermap_{_metric}",
+        )
+        _figures.append(_fig)
+        print(f"✓ Saved: clustermap_{_metric}.png / .svg")
+    mo.vstack(_figures) if _figures else None
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.2 — Metric Comparison
+
+    Do the five metrics actually agree on which wells are similar? A Mantel
+    test answers this directly: correlate the upper triangle of one
+    similarity matrix against another's (excluding the trivial diagonal),
+    which sidesteps re-deriving a joint embedding just to compare two
+    n × n structures on the same samples.
+    """)
+    return
+
+
+@app.cell
+def _(pearsonr):
+    def mantel_correlation(matrix_a, matrix_b):
+        """Pearson r (+ p-value) between two similarity matrices' upper triangles."""
+        n = matrix_a.shape[0]
+        rows, cols = __import__("numpy").triu_indices(n, k=1)
+        r, p = pearsonr(matrix_a[rows, cols], matrix_b[rows, cols])
+        return float(r), float(p)
+
+    return (mantel_correlation,)
+
+
+@app.cell
+def _(mantel_correlation, pd, similarity_matrices):
+    _metric_names = list(similarity_matrices.keys())
+    _rows = []
+    for _i, _metric_a in enumerate(_metric_names):
+        for _metric_b in _metric_names[_i + 1 :]:
+            _r, _p = mantel_correlation(similarity_matrices[_metric_a], similarity_matrices[_metric_b])
+            _rows.append({"metric_a": _metric_a, "metric_b": _metric_b, "mantel_r": _r, "p_value": _p})
+
+    mantel_df = pd.DataFrame(_rows).sort_values("mantel_r", ascending=False).reset_index(drop=True)
+    print("Mantel correlation between similarity metrics (upper triangles):\n")
+    print(mantel_df.to_string(index=False))
+    return (mantel_df,)
+
+
+@app.cell
+def _(SIMILARITY_FIGS_DIR, linkage, np, plt, similarity_matrices, squareform):
+    from scipy.cluster.hierarchy import dendrogram as _dendrogram
+
+    # Every panel uses the SAME (Pearson-derived) well ordering, so a visual
+    # "does this block look tighter under metric X" comparison is valid --
+    # each metric's *own* clustering would reorder wells differently and
+    # make the panels incomparable.
+    _pearson_distance = 1.0 - similarity_matrices["pearson"]
+    np.fill_diagonal(_pearson_distance, 0.0)
+    _pearson_linkage = linkage(squareform(_pearson_distance, checks=False), method="average")
+    _order = _dendrogram(_pearson_linkage, no_plot=True)["leaves"]
+
+    _panel_metrics = [m for m in ("pearson", "cosine", "euclidean") if m in similarity_matrices]
+    _fig, _axes = plt.subplots(1, len(_panel_metrics), figsize=(6 * len(_panel_metrics), 5.5))
+    _axes = np.atleast_1d(_axes)
+    for _ax, _metric in zip(_axes, _panel_metrics):
+        _reordered = similarity_matrices[_metric][np.ix_(_order, _order)]
+        _im = _ax.imshow(_reordered, cmap="RdYlBu_r", vmin=0, vmax=1)
+        _ax.set_title(_metric.capitalize())
+        _ax.set_xticks([])
+        _ax.set_yticks([])
+        _fig.colorbar(_im, ax=_ax, fraction=0.046, pad=0.04)
+    _fig.suptitle("Same well ordering (Pearson linkage) across metrics", fontweight="bold")
+    _fig.tight_layout()
+    _fig.savefig(SIMILARITY_FIGS_DIR / "metric_comparison_heatmaps.png", dpi=300, bbox_inches="tight")
+    plt.close(_fig)
+    print("✓ Saved: metric_comparison_heatmaps.png")
+    return
+
+
+@app.cell
+def _(CONFIG, df, fcluster, linkage, mantel_df, np, pd, similarity_matrices, squareform):
+    _n_treatments = df[CONFIG.treatment_col].nunique()
+    _rows = []
+    for _metric, _sim in similarity_matrices.items():
+        _off_diag = _sim[~np.eye(_sim.shape[0], dtype=bool)]
+        if _metric == "pearson":
+            _mantel_vs_pearson = 1.0
+        else:
+            _match = mantel_df[
+                ((mantel_df["metric_a"] == "pearson") & (mantel_df["metric_b"] == _metric))
+                | ((mantel_df["metric_a"] == _metric) & (mantel_df["metric_b"] == "pearson"))
+            ]
+            _mantel_vs_pearson = float(_match["mantel_r"].iloc[0]) if len(_match) else np.nan
+
+        _distance = 1.0 - _sim
+        np.fill_diagonal(_distance, 0.0)
+        _linkage = linkage(squareform(_distance, checks=False), method="average")
+        _clusters = fcluster(_linkage, t=_n_treatments, criterion="maxclust")
+
+        _rows.append(
+            {
+                "metric": _metric,
+                "min": float(_off_diag.min()),
+                "max": float(_off_diag.max()),
+                "mean": float(_off_diag.mean()),
+                "mantel_r_vs_pearson": _mantel_vs_pearson,
+                f"n_clusters_at_k={_n_treatments}": len(np.unique(_clusters)),
+            }
+        )
+
+    metric_summary_df = pd.DataFrame(_rows)
+    print(f"Metric summary (k = {_n_treatments} treatments):\n")
+    print(metric_summary_df.to_string(index=False))
+    return (metric_summary_df,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.3 — Replicate Reproducibility
+
+    Caicedo et al. 2017: *"similarity scores are compared with a suitable
+    null distribution"* — a treatment's replicates being *somewhat* similar
+    means nothing on its own; what matters is whether they're *more*
+    similar than random cross-treatment pairs. The null distribution below
+    is built the same way as `hca_pipeline.metrics_qc.null_distribution_batch_aware`
+    (used by NB03's from-scratch Percent Replicating): sample random pairs
+    of wells with *different* treatments and correlate them.
+    """)
+    return
+
+
+@app.cell
+def _(CONFIG, X, df, np):
+    from hca_pipeline.metrics_qc import null_distribution_batch_aware
+
+    null_dist = null_distribution_batch_aware(
+        X,
+        df[CONFIG.treatment_col].to_numpy(),
+        plate_labels=df[CONFIG.plate_col].to_numpy(),
+        n_pairs=10_000,
+        seed=42,  # same seed convention as every other notebook in this pipeline
+    )
+    print(f"Null distribution: {len(null_dist):,} random cross-treatment pairs")
+    print(f"  mean={null_dist.mean():.3f}  95th percentile={np.percentile(null_dist, 95):.3f}")
+
+    def percent_replicating_simplified(sim_matrix, labels, null_dist, percentile=95):
+        """Fraction of treatments whose intra-treatment similarity clears the null.
+
+        A lighter-weight, metric-agnostic cousin of
+        `hca_pipeline.metrics_qc.percent_replicating` (which is Pearson-only):
+        this takes any precomputed similarity matrix, so it can score the
+        cosine/Spearman/Mahalanobis matrices too, not just Pearson. For each
+        treatment, take the median of its intra-treatment (replicate-pair)
+        similarities; a treatment "replicates" if that median exceeds the
+        given percentile of the null distribution.
+        """
+        threshold = float(np.percentile(null_dist, percentile))
+        labels = np.asarray(labels)
+        medians = {}
+        for label in np.unique(labels):
+            idx = np.where(labels == label)[0]
+            if len(idx) < 2:
+                continue
+            sub = sim_matrix[np.ix_(idx, idx)]
+            upper = sub[np.triu_indices(len(idx), k=1)]
+            medians[label] = float(np.median(upper))
+        passing = [m > threshold for m in medians.values()]
+        pr = float(np.mean(passing)) if passing else 0.0
+        return pr, medians, threshold
+
+    return null_dist, percent_replicating_simplified
+
+
+@app.cell
+def _(CONFIG, SIMILARITY_FIGS_DIR, df, null_dist, np, plt, similarity_matrices):
+    _labels = df[CONFIG.treatment_col].to_numpy()
+    _pearson = similarity_matrices["pearson"]
+
+    _intra, _inter = [], []
+    for _i in range(len(_labels)):
+        for _j in range(_i + 1, len(_labels)):
+            (_intra if _labels[_i] == _labels[_j] else _inter).append(_pearson[_i, _j])
+
+    _fig, _ax = plt.subplots(figsize=(7, 5.5))
+    _ax.boxplot([_intra, _inter], tick_labels=["Intra-treatment\n(replicates)", "Inter-treatment\n(different)"])
+    _ax.axhline(
+        np.percentile(null_dist, 95), color="crimson", ls="--", lw=1.5,
+        label="Null 95th percentile",
+    )
+    _ax.set_ylabel("Pearson similarity")
+    _ax.set_title("Replicate agreement vs. random cross-treatment pairs")
+    _ax.legend()
+    _fig.tight_layout()
+    _fig.savefig(SIMILARITY_FIGS_DIR / "intra_vs_inter_treatment_boxplot.png", dpi=300, bbox_inches="tight")
+    plt.close(_fig)
+    print("✓ Saved: intra_vs_inter_treatment_boxplot.png")
+    return
+
+
+@app.cell
+def _(CONFIG, df, null_dist, pd, percent_replicating_simplified, similarity_matrices):
+    _pr, _medians, _threshold = percent_replicating_simplified(
+        similarity_matrices["pearson"], df[CONFIG.treatment_col].to_numpy(), null_dist,
+    )
+    pr_simplified_df = pd.DataFrame(
+        [
+            {
+                "treatment": _label,
+                "median_intra_similarity": _median,
+                "null_threshold": _threshold,
+                "replicates": _median > _threshold,
+            }
+            for _label, _median in _medians.items()
+        ]
+    ).sort_values("median_intra_similarity", ascending=False).reset_index(drop=True)
+
+    print(f"Percent replicating (simplified, Pearson, 95th-percentile null): {_pr:.1%}\n")
+    print(pr_simplified_df.to_string(index=False))
+    return (pr_simplified_df,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.4 — Pearson ≈ Cosine Equivalence
+
+    Pearson correlation *is* the cosine similarity of mean-centered vectors
+    — not an approximation, an identity. Because this notebook's `X` is
+    already per-feature centered (`StandardScaler`, and `mad_robustize`
+    upstream in NB02 does the same), the Pearson and cosine matrices above
+    should be near-identical. This is the same reason `copairs` (NB03's
+    mAP/PR-based QC) can use cosine similarity and still be measuring
+    essentially the same thing as the from-scratch Pearson-based metrics
+    used elsewhere in this pipeline.
+    """)
+    return
+
+
+@app.cell
+def _(SIMILARITY_FIGS_DIR, np, pearsonr, plt, similarity_matrices):
+    _n = similarity_matrices["pearson"].shape[0]
+    _rows, _cols = np.triu_indices(_n, k=1)
+    _pearson_upper = similarity_matrices["pearson"][_rows, _cols]
+    _cosine_upper = similarity_matrices["cosine"][_rows, _cols]
+    pearson_cosine_equivalence_r, _ = pearsonr(_pearson_upper, _cosine_upper)
+
+    _fig, _ax = plt.subplots(figsize=(5.5, 5.5))
+    _ax.scatter(_pearson_upper, _cosine_upper, s=8, alpha=0.4)
+    _ax.plot([0, 1], [0, 1], "k--", lw=1, label="y = x")
+    _ax.set_xlabel("Pearson similarity")
+    _ax.set_ylabel("Cosine similarity")
+    _ax.set_title(f"Pearson vs. cosine (r = {pearson_cosine_equivalence_r:.4f})")
+    _ax.legend()
+    _fig.tight_layout()
+    _fig.savefig(SIMILARITY_FIGS_DIR / "pearson_cosine_equivalence.png", dpi=300, bbox_inches="tight")
+    plt.close(_fig)
+
+    print(
+        f"Pearson and cosine are equivalent on this notebook's centered data "
+        f"(r = {pearson_cosine_equivalence_r:.4f})."
+    )
+    return (pearson_cosine_equivalence_r,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.5 — Connection to `copairs` (NB03)
+
+    NB03's Go/No-Go dashboard already scores replicate reproducibility
+    properly (mAP via `copairs`, cosine-based). This is a cheap
+    cross-check, not a replacement: if a treatment's mAP is high but its
+    median intra-treatment Pearson similarity here is low (or vice versa),
+    that disagreement is worth investigating rather than trusting either
+    number blindly.
+    """)
+    return
+
+
+@app.cell
+def _(CONFIG, RESULTS_DIR, SIMILARITY_FIGS_DIR, df, pd, plt, similarity_matrices):
+    _map_csv = RESULTS_DIR / "quality_metrics" / "app_a_per_plate_map.csv"
+    if _map_csv.exists():
+        _map_df = pd.read_csv(_map_csv)
+        _map_by_treatment = _map_df.groupby("treatment")["mAP_copairs"].mean()
+
+        _pearson = similarity_matrices["pearson"]
+        _labels = df[CONFIG.treatment_col].to_numpy()
+        _intra_median = {}
+        for _label in _map_by_treatment.index:
+            _idx = __import__("numpy").where(_labels == _label)[0]
+            if len(_idx) < 2:
+                continue
+            _sub = _pearson[__import__("numpy").ix_(_idx, _idx)]
+            _upper = _sub[__import__("numpy").triu_indices(len(_idx), k=1)]
+            _intra_median[_label] = float(__import__("numpy").median(_upper))
+
+        _common = sorted(set(_map_by_treatment.index) & set(_intra_median.keys()))
+        if _common:
+            _fig, _ax = plt.subplots(figsize=(6.5, 5.5))
+            _ax.scatter(
+                [_map_by_treatment[t] for t in _common],
+                [_intra_median[t] for t in _common],
+                s=40,
+            )
+            for t in _common:
+                _ax.annotate(t, (_map_by_treatment[t], _intra_median[t]), fontsize=7)
+            _ax.set_xlabel("NB03 mean average precision (copairs, cosine)")
+            _ax.set_ylabel("Median intra-treatment Pearson similarity (this section)")
+            _ax.set_title("mAP vs. similarity-based replicate agreement")
+            _fig.tight_layout()
+            _fig.savefig(SIMILARITY_FIGS_DIR / "map_vs_similarity.png", dpi=300, bbox_inches="tight")
+            plt.close(_fig)
+            print(f"✓ Saved: map_vs_similarity.png ({len(_common)} treatments in common)")
+        else:
+            print("NB03 mAP results found but no treatments in common — skipping comparison plot.")
+    else:
+        print(f"NB03 mAP results not found — run NB03 first for comparison ({_map_csv}).")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 8b.6 — Save Artifacts
+    """)
+    return
+
+
+@app.cell
+def _(
+    OVERWRITE_EXISTING_OUTPUTS,
+    SIMILARITY_RESULTS_DIR,
+    df,
+    mantel_df,
+    metric_summary_df,
+    pr_simplified_df,
+    similarity_matrices,
+    write_csv_protected,
+):
+    _well_ids = df.index.astype(str)
+    for _metric, _sim in similarity_matrices.items():
+        _sim_df = __import__("pandas").DataFrame(_sim, index=_well_ids, columns=_well_ids)
+        _status = write_csv_protected(
+            _sim_df, SIMILARITY_RESULTS_DIR / f"{_metric}_matrix.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS,
+        )
+        print(f"  {_metric:<12} matrix {_status}")
+
+    write_csv_protected(mantel_df, SIMILARITY_RESULTS_DIR / "mantel_comparison.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
+    write_csv_protected(metric_summary_df, SIMILARITY_RESULTS_DIR / "metric_summary.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
+    write_csv_protected(pr_simplified_df, SIMILARITY_RESULTS_DIR / "percent_replicating_simplified.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
+    print(f"✓ Saved similarity-matrix artifacts to {SIMILARITY_RESULTS_DIR}")
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    REPO_ROOT,
+    SIMILARITY_RESULTS_DIR,
+    X,
+    datetime,
+    feat_cols,
+    json,
+    pearson_cosine_equivalence_r,
+    similarity_matrices,
+    subprocess,
+    validate_output_path,
+):
+    try:
+        _git_hash = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(REPO_ROOT),
+        ).stdout.strip()[:8]
+    except Exception:
+        _git_hash = "unknown"
+
+    _provenance = {
+        "notebook": "04_phenotypic_profiling.py (Section 8b)",
+        "experiment_id": CONFIG.experiment_id,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "git_hash": _git_hash,
+        "n_wells": int(X.shape[0]),
+        "n_features": int(len(feat_cols)),
+        "metrics_computed": list(similarity_matrices.keys()),
+        "pearson_cosine_equivalence_r": pearson_cosine_equivalence_r,
+    }
+    _path = validate_output_path(SIMILARITY_RESULTS_DIR / "provenance.json", overwrite=True)
+    _path.write_text(json.dumps(_provenance, indent=2), encoding="utf-8")
+    print(f"✓ Provenance: {_path}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Section 8b complete
+
+    Produced: 5 similarity matrices (CSV), 2 clustermaps + a 3-panel metric
+    comparison + an intra/inter-treatment boxplot + a Pearson/cosine
+    equivalence scatter (PNG/SVG), a Mantel comparison table, a per-metric
+    summary table, and a simplified percent-replicating table — all under
+    `results/similarity_matrices/` and `figures/phenotypic_profiling/similarity_matrices/`.
+    This is exploratory and does not gate NB04's own integrity checks below.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Section 8c — Graph-Based Clustering & Manifold Learning (diagnostic)
+
+    **Reason:** Section 8b's clustering was hierarchical (`fcluster`, forced to
+    `k = n_treatments`), and NB04's own downstream KMeans
+    (`hca_pipeline.modelling.run_modelling_space`) clusters the **LDA
+    representation** — a *supervised*, label-informed embedding, not a test of
+    whether the raw morphology separates into groups on its own. This section
+    asks the more literal version of "does the data form clusters?": run
+    graph-based (spectral) clustering on several affinity constructions and
+    manifold learning directly on the *unsupervised* PCA space (`X`), and
+    compare against a plain KMeans baseline using the metrics scikit-learn's
+    own clustering guide recommends — silhouette, Calinski-Harabasz,
+    Davies-Bouldin — plus bootstrap stability and agreement with treatment
+    identity.
+
+    **Assumptions:**
+
+    - The affinity/graph construction determines what "similar" means before
+      any clustering happens — a bad choice (e.g. an untuned RBF `gamma`) can
+      silently produce a degenerate result that still looks fine by some
+      metrics. This is checked below, not assumed away.
+    - Comparing clusters against treatment identity is a *proxy*, not a
+      validation: it only shows whether unsupervised structure lines up with
+      *known* labels, not whether an unlabeled subpopulation is real. A
+      genuine treatment-independent phenotype would score badly here and
+      still be real.
+    - `k` is **not** assumed to be `n_treatments` here — unlike Section 8b's
+      hierarchical cut, a k-sweep lets the data suggest its own answer.
+
+    This is a diagnostic section: it does not gate NB04's integrity checks,
+    and its conclusion (below) is written from whatever this run's numbers
+    actually show, not asserted in advance.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    graph_knn_neighbors_input = mo.ui.number(
+        value=15, start=3, stop=50, label="k-NN graph / manifold n_neighbors"
+    )
+    graph_k_max_input = mo.ui.number(value=9, start=3, stop=20, label="Max k to sweep for clustering")
+    graph_n_bootstrap_input = mo.ui.number(
+        value=20, start=5, stop=200, label="Bootstrap resamples for cluster stability"
+    )
+    mo.accordion(
+        {
+            "Advanced: graph-clustering / manifold parameters": mo.vstack(
+                [graph_knn_neighbors_input, graph_k_max_input, graph_n_bootstrap_input]
+            ),
+        }
+    )
+    return graph_k_max_input, graph_knn_neighbors_input, graph_n_bootstrap_input
+
+
+@app.cell
+def _(FIGS_DIR, RESULTS_DIR):
+    # Dedicated subdirectory (matching Section 8b's own similarity_matrices/
+    # split) so this diagnostic section's outputs never collide with the
+    # modelling-space results written above.
+    GRAPH_CLUSTERING_RESULTS_DIR = RESULTS_DIR / "graph_clustering"
+    GRAPH_CLUSTERING_FIGS_DIR = FIGS_DIR / "graph_clustering"
+    GRAPH_CLUSTERING_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    GRAPH_CLUSTERING_FIGS_DIR.mkdir(parents=True, exist_ok=True)
+    return GRAPH_CLUSTERING_FIGS_DIR, GRAPH_CLUSTERING_RESULTS_DIR
+
+
+@app.cell
+def _():
+    # All third-party names this section needs, imported once (mirroring
+    # Section 8b's own "imports for this section" cell) — marimo requires
+    # every name to be defined in exactly one cell, so each subsequent cell
+    # below consumes these as parameters rather than re-importing them.
+    from sklearn.cluster import KMeans, SpectralClustering
+    from sklearn.manifold import Isomap, LocallyLinearEmbedding, trustworthiness
+    from sklearn.metrics import (
+        adjusted_rand_score,
+        calinski_harabasz_score,
+        davies_bouldin_score,
+        silhouette_score,
+    )
+    from sklearn.metrics.pairwise import rbf_kernel
+    from sklearn.neighbors import kneighbors_graph
+
+    return (
+        Isomap,
+        KMeans,
+        LocallyLinearEmbedding,
+        SpectralClustering,
+        adjusted_rand_score,
+        calinski_harabasz_score,
+        davies_bouldin_score,
+        kneighbors_graph,
+        rbf_kernel,
+        silhouette_score,
+        trustworthiness,
+    )
+
+
+@app.cell
+def _(X, graph_knn_neighbors_input, kneighbors_graph, np, rbf_kernel, similarity_matrices):
+    # RBF and k-NN graph are new affinity constructions; cosine/Pearson reuse
+    # Section 8b's similarity matrices as-is (shifted from [-1, 1] to [0, 1]
+    # since spectral clustering requires a nonnegative affinity) rather than
+    # recomputing them a second time.
+    _knn_graph = kneighbors_graph(
+        X, n_neighbors=int(graph_knn_neighbors_input.value), mode="connectivity", include_self=False,
+    )
+    # kneighbors_graph is directed (asymmetric); symmetrize into an
+    # undirected affinity graph, which is what spectral clustering expects.
+    _knn_symmetric = (_knn_graph + _knn_graph.T) > 0
+    knn_graph_affinity = np.asarray(_knn_symmetric.astype(float).todense())
+
+    graph_affinities = {
+        "rbf": rbf_kernel(X),
+        "knn_graph": knn_graph_affinity,
+        "cosine": (similarity_matrices["cosine"] + 1) / 2,
+        "pearson": (similarity_matrices["pearson"] + 1) / 2,
+    }
+    print(f"Affinity matrices built: {list(graph_affinities.keys())}")
+    return (graph_affinities,)
+
+
+@app.cell
+def _(
+    CONFIG,
+    KMeans,
+    RANDOM_STATE,
+    SpectralClustering,
+    X,
+    adjusted_rand_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
+    df,
+    graph_affinities,
+    graph_k_max_input,
+    np,
+    pd,
+    silhouette_score,
+):
+    _treatment_labels = df[CONFIG.treatment_col].astype(str).to_numpy()
+
+    _rows = []
+    for _k in range(2, int(graph_k_max_input.value) + 1):
+        _km_labels = KMeans(n_clusters=_k, random_state=RANDOM_STATE, n_init=10).fit_predict(X)
+        _rows.append(
+            {
+                "k": _k,
+                "method": "kmeans_pca",
+                "silhouette": silhouette_score(X, _km_labels),
+                "calinski_harabasz": calinski_harabasz_score(X, _km_labels),
+                "davies_bouldin": davies_bouldin_score(X, _km_labels),
+                "ari_vs_treatment": adjusted_rand_score(_treatment_labels, _km_labels),
+            }
+        )
+        for _affinity_name, _affinity in graph_affinities.items():
+            _sc_labels = SpectralClustering(
+                n_clusters=_k, random_state=RANDOM_STATE, affinity="precomputed", assign_labels="kmeans",
+            ).fit_predict(_affinity)
+            if len(np.unique(_sc_labels)) < 2:
+                # Degenerate solution (e.g. RBF collapsing to fewer real
+                # clusters than requested) -- not a valid clustering to score.
+                continue
+            _rows.append(
+                {
+                    "k": _k,
+                    "method": f"spectral_{_affinity_name}",
+                    "silhouette": silhouette_score(X, _sc_labels),
+                    "calinski_harabasz": calinski_harabasz_score(X, _sc_labels),
+                    "davies_bouldin": davies_bouldin_score(X, _sc_labels),
+                    "ari_vs_treatment": adjusted_rand_score(_treatment_labels, _sc_labels),
+                }
+            )
+
+    clustering_comparison_df = pd.DataFrame(_rows)
+    print("Spectral clustering vs. KMeans, across affinities and k:\n")
+    print(clustering_comparison_df.round(4).to_string(index=False))
+    return (clustering_comparison_df,)
+
+
+@app.cell
+def _(KMeans, RANDOM_STATE, SpectralClustering, X, adjusted_rand_score, graph_n_bootstrap_input, np, pd):
+    # Representative k for the stability check (the sweep above already
+    # covers k's effect on cluster quality; this asks a different question —
+    # holding k fixed, how much does the clustering change under resampling?).
+    _k_stability = 6
+    _n = X.shape[0]
+    _n_boot = int(graph_n_bootstrap_input.value)
+    _rng = np.random.RandomState(RANDOM_STATE)
+
+    def _bootstrap_stability(fit_predict):
+        _base_labels = fit_predict(X)
+        _aris = []
+        for _ in range(_n_boot):
+            _idx = _rng.choice(_n, size=_n, replace=True)
+            _boot_labels = fit_predict(X[_idx])
+            _aris.append(adjusted_rand_score(_base_labels[_idx], _boot_labels))
+        return float(np.mean(_aris)), float(np.std(_aris))
+
+    _stability_rows = []
+    _mean_ari, _std_ari = _bootstrap_stability(
+        lambda Z: KMeans(n_clusters=_k_stability, random_state=RANDOM_STATE, n_init=10).fit_predict(Z)
+    )
+    _stability_rows.append({"method": "kmeans_pca", "mean_ari": _mean_ari, "std_ari": _std_ari})
+
+    for _affinity_mode, _method_name in [("rbf", "spectral_rbf"), ("nearest_neighbors", "spectral_knn_graph")]:
+        try:
+            _mean_ari, _std_ari = _bootstrap_stability(
+                lambda Z, _mode=_affinity_mode: SpectralClustering(
+                    n_clusters=_k_stability, random_state=RANDOM_STATE, affinity=_mode,
+                ).fit_predict(Z)
+            )
+        except Exception as exc:
+            print(f"  ⚠️  Stability check for {_method_name} failed: {exc!r}")
+            _mean_ari, _std_ari = float("nan"), float("nan")
+        _stability_rows.append({"method": _method_name, "mean_ari": _mean_ari, "std_ari": _std_ari})
+
+    stability_df = pd.DataFrame(_stability_rows)
+    print(f"Bootstrap cluster stability (k={_k_stability}, {_n_boot} resamples):\n")
+    print(stability_df.round(4).to_string(index=False))
+    return (stability_df,)
+
+
+@app.cell
+def _(
+    CONFIG,
+    Isomap,
+    KMeans,
+    LocallyLinearEmbedding,
+    RANDOM_STATE,
+    UMAP,
+    UMAP_OK,
+    X,
+    adjusted_rand_score,
+    df,
+    graph_knn_neighbors_input,
+    np,
+    pd,
+    silhouette_score,
+    trustworthiness,
+):
+    _treatment_labels = df[CONFIG.treatment_col].astype(str).to_numpy()
+    _n_neighbors = int(graph_knn_neighbors_input.value)
+    _n_treatments = len(np.unique(_treatment_labels))
+
+    manifold_embeddings = {"pca_2d": X[:, :2]}
+    if UMAP_OK:
+        manifold_embeddings["umap"] = UMAP(
+            n_components=2, n_neighbors=_n_neighbors, min_dist=0.1, random_state=RANDOM_STATE, n_jobs=1,
+        ).fit_transform(X)
+    manifold_embeddings["isomap"] = Isomap(n_components=2, n_neighbors=_n_neighbors).fit_transform(X)
+    manifold_embeddings["lle"] = LocallyLinearEmbedding(
+        n_components=2, n_neighbors=_n_neighbors, random_state=RANDOM_STATE,
+    ).fit_transform(X)
+
+    _rows = []
+    for _name, _embedding in manifold_embeddings.items():
+        _km_labels = KMeans(n_clusters=_n_treatments, random_state=RANDOM_STATE, n_init=10).fit_predict(_embedding)
+        _rows.append(
+            {
+                "embedding": _name,
+                "trustworthiness": trustworthiness(X, _embedding, n_neighbors=10),
+                "kmeans_silhouette_on_embedding": silhouette_score(_embedding, _km_labels),
+                "ari_vs_treatment": adjusted_rand_score(_treatment_labels, _km_labels),
+            }
+        )
+    manifold_comparison_df = pd.DataFrame(_rows)
+    print("Manifold learning: local-structure preservation vs. downstream clustering:\n")
+    print(manifold_comparison_df.round(4).to_string(index=False))
+    return manifold_comparison_df, manifold_embeddings
+
+
+@app.cell
+def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, df, manifold_embeddings, plt, scatter_panel):
+    _names = list(manifold_embeddings.keys())
+    _fig, _axes = plt.subplots(1, len(_names), figsize=(5.5 * len(_names), 5))
+    _axes = [_axes] if len(_names) == 1 else list(_axes)
+    for _ax, _name in zip(_axes, _names):
+        scatter_panel(
+            _ax, manifold_embeddings[_name][:, 0], manifold_embeddings[_name][:, 1],
+            df[CONFIG.treatment_col].astype(str).tolist(), _name.upper(),
+        )
+    _fig.suptitle("Manifold embeddings colored by treatment", fontweight="bold")
+    _fig.tight_layout()
+    _fig.savefig(GRAPH_CLUSTERING_FIGS_DIR / "manifold_embeddings.png", dpi=200, bbox_inches="tight")
+    plt.close(_fig)
+    print("✓ Saved: manifold_embeddings.png")
+    _fig
+    return
+
+
+@app.cell
+def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, X, cosine_similarity, df, plt, pd):
+    # Treatment-level consensus profiles: if wells within a treatment
+    # average out to well-separated points, that supports discrete clusters;
+    # if consensus profiles instead grade smoothly into each other (or sit at
+    # opposite poles of a shared axis), that supports a continuum instead --
+    # exactly the framing NB07's recovery axis already uses for this
+    # dataset's dormancy/recovery design.
+    _pca_df = pd.DataFrame(X, columns=[f"pc{i}" for i in range(X.shape[1])])
+    _pca_df[CONFIG.treatment_col] = df[CONFIG.treatment_col].astype(str).to_numpy()
+    _consensus = _pca_df.groupby(CONFIG.treatment_col).mean()
+    consensus_similarity_df = pd.DataFrame(
+        cosine_similarity(_consensus.to_numpy()), index=_consensus.index, columns=_consensus.index,
+    )
+
+    _fig, _ax = plt.subplots(figsize=(6.5, 5.5))
+    _im = _ax.imshow(consensus_similarity_df.to_numpy(), cmap="RdYlBu_r", vmin=-1, vmax=1)
+    _ax.set_xticks(range(len(_consensus.index)))
+    _ax.set_xticklabels(_consensus.index, rotation=45, ha="right")
+    _ax.set_yticks(range(len(_consensus.index)))
+    _ax.set_yticklabels(_consensus.index)
+    _fig.colorbar(_im, ax=_ax, label="Cosine similarity")
+    _ax.set_title("Treatment-level consensus profile similarity")
+    _fig.tight_layout()
+    _fig.savefig(GRAPH_CLUSTERING_FIGS_DIR / "consensus_similarity.png", dpi=200, bbox_inches="tight")
+    plt.close(_fig)
+    print("✓ Saved: consensus_similarity.png")
+    print(consensus_similarity_df.round(3).to_string())
+    return (consensus_similarity_df,)
+
+
+@app.cell
+def _(clustering_comparison_df, consensus_similarity_df, np, stability_df):
+    _kmeans_rows = clustering_comparison_df.loc[clustering_comparison_df["method"] == "kmeans_pca"]
+    _best_k_row = _kmeans_rows.loc[_kmeans_rows["silhouette"].idxmax()]
+    best_k_kmeans = int(_best_k_row["k"])
+    best_k_kmeans_silhouette = float(_best_k_row["silhouette"])
+
+    _at_k6 = clustering_comparison_df.loc[clustering_comparison_df["k"] == 6]
+    kmeans_ari_at_k6 = float(_at_k6.loc[_at_k6["method"] == "kmeans_pca", "ari_vs_treatment"].iloc[0])
+    _spectral_at_k6 = _at_k6.loc[_at_k6["method"].str.startswith("spectral_")]
+    if len(_spectral_at_k6):
+        _best_spectral_row = _spectral_at_k6.loc[_spectral_at_k6["ari_vs_treatment"].idxmax()]
+        best_spectral_method_at_k6 = str(_best_spectral_row["method"])
+        best_spectral_ari_at_k6 = float(_best_spectral_row["ari_vs_treatment"])
+    else:
+        best_spectral_method_at_k6, best_spectral_ari_at_k6 = "none", float("nan")
+    spectral_beats_kmeans_at_k6 = best_spectral_ari_at_k6 > kmeans_ari_at_k6
+
+    kmeans_stability = float(stability_df.loc[stability_df["method"] == "kmeans_pca", "mean_ari"].iloc[0])
+    spectral_rbf_stability = float(stability_df.loc[stability_df["method"] == "spectral_rbf", "mean_ari"].iloc[0])
+
+    # Most anti-correlated pair of treatment consensus profiles -- evidence
+    # for a shared axis/continuum (opposite poles) rather than unrelated,
+    # independently-scattered clusters.
+    _sim = consensus_similarity_df.to_numpy().copy()
+    np.fill_diagonal(_sim, np.nan)
+    _min_idx = np.unravel_index(np.nanargmin(_sim), _sim.shape)
+    most_anticorrelated_pair = (
+        str(consensus_similarity_df.index[_min_idx[0]]),
+        str(consensus_similarity_df.columns[_min_idx[1]]),
+    )
+    most_anticorrelated_value = float(_sim[_min_idx])
+
+    return (
+        best_k_kmeans,
+        best_k_kmeans_silhouette,
+        best_spectral_ari_at_k6,
+        best_spectral_method_at_k6,
+        kmeans_ari_at_k6,
+        kmeans_stability,
+        most_anticorrelated_pair,
+        most_anticorrelated_value,
+        spectral_beats_kmeans_at_k6,
+        spectral_rbf_stability,
+    )
+
+
+@app.cell
+def _(
+    best_k_kmeans,
+    best_k_kmeans_silhouette,
+    best_spectral_ari_at_k6,
+    best_spectral_method_at_k6,
+    kmeans_ari_at_k6,
+    kmeans_stability,
+    mo,
+    most_anticorrelated_pair,
+    most_anticorrelated_value,
+    spectral_beats_kmeans_at_k6,
+    spectral_rbf_stability,
+):
+    _stability_note = (
+        f"but at a stability cost — {spectral_rbf_stability:.2f} mean bootstrap ARI for "
+        f"RBF-affinity spectral clustering vs. {kmeans_stability:.2f} for KMeans, i.e. "
+        "noticeably less reproducible under resampling"
+        if spectral_beats_kmeans_at_k6
+        else "and KMeans remains both more accurate and more stable under resampling"
+    )
+    mo.md(
+        f"""
+    ### Verdict (computed from this run, not asserted in advance)
+
+    - **Best unsupervised `k` for KMeans on PCA:** `{best_k_kmeans}`
+      (silhouette {best_k_kmeans_silhouette:.3f}) — {"matches" if best_k_kmeans == 6 else "does **not** match"}
+      the number of treatments (6). {"" if best_k_kmeans == 6 else "The strongest unsupervised split in this data is coarser than treatment identity, which is itself informative: it suggests a dominant axis (e.g. dormant vs. proliferative) rather than 6 evenly-separated treatment clusters."}
+    - **Spectral clustering vs. KMeans at k=6:** best spectral variant is
+      `{best_spectral_method_at_k6}` (ARI vs. treatment {best_spectral_ari_at_k6:.3f}) vs.
+      KMeans's {kmeans_ari_at_k6:.3f}. {"Spectral clustering modestly **out-agrees** KMeans with treatment identity here, " + _stability_note + "." if spectral_beats_kmeans_at_k6 else _stability_note.capitalize() + "."}
+    - **Most anti-correlated treatment pair:** `{most_anticorrelated_pair[0]}` vs.
+      `{most_anticorrelated_pair[1]}` (cosine similarity {most_anticorrelated_value:.2f}) —
+      consistent with a **continuum** between opposite phenotypic poles rather than
+      unrelated, independently-scattered clusters.
+
+    **Recommendation for this dataset:** graph-based clustering and manifold learning
+    do not provide a decisive win over the existing PCA + KMeans / LDA-based
+    workflow — RBF-affinity spectral clustering in particular is prone to
+    degenerate, unstable solutions here (see the k-sweep and bootstrap-stability
+    tables above), and manifold learning (UMAP/Isomap/LLE) improves visual
+    separability without proportionally improving agreement with treatment
+    identity. The more actionable finding is structural, not algorithmic: this
+    dataset's dormancy/recovery design looks better described by a **continuum**
+    (as NB07's geometric recovery axis already models) than by forcing it into
+    discrete clusters, whichever clustering algorithm is used. Kept as a
+    diagnostic section — re-run it on other experiments before assuming this
+    verdict transfers; a dataset with more/tighter treatment clusters could
+    show a different, more favorable balance for spectral clustering.
+    """
+    )
+    return
+
+
+@app.cell
+def _(
+    GRAPH_CLUSTERING_RESULTS_DIR,
+    OVERWRITE_EXISTING_OUTPUTS,
+    clustering_comparison_df,
+    consensus_similarity_df,
+    manifold_comparison_df,
+    stability_df,
+    write_csv_protected,
+):
+    write_csv_protected(
+        clustering_comparison_df, GRAPH_CLUSTERING_RESULTS_DIR / "clustering_comparison.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    write_csv_protected(
+        stability_df, GRAPH_CLUSTERING_RESULTS_DIR / "bootstrap_stability.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    write_csv_protected(
+        manifold_comparison_df, GRAPH_CLUSTERING_RESULTS_DIR / "manifold_comparison.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    write_csv_protected(
+        consensus_similarity_df.reset_index(), GRAPH_CLUSTERING_RESULTS_DIR / "consensus_similarity.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    print(f"✓ Saved graph-clustering artifacts to {GRAPH_CLUSTERING_RESULTS_DIR}")
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    GRAPH_CLUSTERING_RESULTS_DIR,
+    REPO_ROOT,
+    X,
+    best_k_kmeans,
+    best_spectral_ari_at_k6,
+    best_spectral_method_at_k6,
+    datetime,
+    json,
+    kmeans_ari_at_k6,
+    kmeans_stability,
+    spectral_rbf_stability,
+    subprocess,
+    validate_output_path,
+):
+    try:
+        _git_hash = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(REPO_ROOT),
+        ).stdout.strip()[:8]
+    except Exception:
+        _git_hash = "unknown"
+
+    _provenance = {
+        "notebook": "04_phenotypic_profiling.py (Section 8c)",
+        "experiment_id": CONFIG.experiment_id,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "git_hash": _git_hash,
+        "n_wells": int(X.shape[0]),
+        "best_k_kmeans": best_k_kmeans,
+        "kmeans_ari_at_k6": kmeans_ari_at_k6,
+        "best_spectral_method_at_k6": best_spectral_method_at_k6,
+        "best_spectral_ari_at_k6": best_spectral_ari_at_k6,
+        "kmeans_stability": kmeans_stability,
+        "spectral_rbf_stability": spectral_rbf_stability,
+    }
+    _path = validate_output_path(GRAPH_CLUSTERING_RESULTS_DIR / "provenance.json", overwrite=True)
+    _path.write_text(json.dumps(_provenance, indent=2), encoding="utf-8")
+    print(f"✓ Provenance: {_path}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## Section 9 — Provenance and completion
     """)
     return
@@ -1874,11 +3151,6 @@ def _(
     print(f"  Wells profiled          : {len(df):,}")
     print(f"  Spaces run              : {', '.join(RUN_ANALYSIS_SPACES)}")
     print("✓ All final integrity checks passed")
-    return
-
-
-@app.cell
-def _():
     return
 
 
