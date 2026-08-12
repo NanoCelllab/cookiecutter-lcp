@@ -323,7 +323,7 @@ def mean_average_precision(
     plate_labels: np.ndarray | None = None,
     exclude_same_plate: bool = False,
 ) -> tuple[float, dict[Any, float], list[float]]:
-    """Mean Average Precision (mAP) — full-ranking retrieval.
+    """Phenotypic-consistency mAP (PC mAP) — full-ranking replicate retrieval.
 
     Returns ``(overall_map, per_treatment_dict, per_profile_list)``.
     Note: ``overall_map`` is micro-averaged (mean of all per-profile APs);
@@ -376,6 +376,11 @@ def copairs_compute_map(
 ) -> pd.DataFrame:
     """Compute mAP using copairs with configurable pair definitions.
 
+    The caller must qualify the result from those definitions: same-treatment
+    positives measure phenotypic consistency (PC), treatment-vs-control
+    reference retrieval measures phenotypic activity, and same-MoA positives
+    would measure phenotypic distinctiveness.
+
     Returns a DataFrame with ``mean_average_precision``, ``p_value``, and
     ``corrected_p_value``, plus one metadata column per entry in
     ``pos_sameby`` (named after the actual grouping column, e.g. whatever the
@@ -421,7 +426,7 @@ def copairs_treatment_vs_control_map(
     null_size: int = 10000,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Treatment-vs-control mAP using copairs reference indexing.
+    """Phenotypic-activity mAP using copairs treatment-vs-control indexing.
 
     Each negcon well gets a unique reference index; treatments are paired
     against their matched negcon reference.
@@ -486,7 +491,7 @@ def copairs_dose_response_map(
     null_size: int = 10000,
     seed: int = 42,
 ) -> tuple[pd.DataFrame | None, list]:
-    """Dose-level mAP for multi-dose treatments.
+    """Dose-level phenotypic-consistency mAP (PC mAP).
 
     Groups by a composite ``treatment_dose`` label (not the bare treatment
     column), so the resulting mAP table's grouping column is intentionally
@@ -788,9 +793,9 @@ def plot_per_plate_qc(qc_result: dict, plate_col: str, output_path: str | None =
     sig_colors = ["#0279EE" if p else "#FF9400" for p in map_df["copairs_fdr_significant"]]
     ax.scatter(map_df["mAP_from_scratch"], map_df["mAP_copairs"], c=sig_colors, alpha=0.7, edgecolors="black", linewidth=0.5)
     ax.plot([0, 1], [0, 1], "k--", alpha=0.3, linewidth=1)
-    ax.set_xlabel("mAP (from-scratch, Pearson)")
-    ax.set_ylabel("mAP (copairs, cosine)")
-    ax.set_title("mAP Cross-validation (blue=FDR sig)")
+    ax.set_xlabel("PC mAP (from-scratch, Pearson)")
+    ax.set_ylabel("PC mAP (copairs, cosine)")
+    ax.set_title("Phenotypic-consistency mAP cross-validation\n(blue=FDR sig)")
     ax.set_xlim(0, 1.05)
     ax.set_ylim(0, 1.05)
 
@@ -961,9 +966,9 @@ def plot_cross_plate_batch(batch_result: dict, output_path: str | None = None):
     ax.plot([0, 1], [0, 1], "k--", alpha=0.3, linewidth=1)
     for _, row in batch_df.iterrows():
         ax.annotate(str(row["treatment"])[:8], (row["within_plate_map"], row["cross_plate_map"]), fontsize=7, alpha=0.8, xytext=(5, 5), textcoords="offset points")
-    ax.set_xlabel("Within-plate mAP")
-    ax.set_ylabel("Cross-plate mAP")
-    ax.set_title("mAP: Within vs Cross-plate")
+    ax.set_xlabel("Within-plate PC mAP")
+    ax.set_ylabel("Cross-plate PC mAP")
+    ax.set_title("Phenotypic consistency: within vs cross-plate")
     ax.set_xlim(0, 1.05)
     ax.set_ylim(0, 1.05)
 
@@ -1249,8 +1254,8 @@ def plot_dose_response(dose_result: dict, output_path: str | None = None):
         ax.barh(y_pos, dm["mean_average_precision"], color=bar_colors, alpha=0.8)
         ax.set_yticks(y_pos)
         ax.set_yticklabels(dm["Metadata_Treatment_Dose"], fontsize=9)
-        ax.set_xlabel("mAP")
-        ax.set_title("Dose retrieval mAP\n(blue = FDR sig)")
+        ax.set_xlabel("Dose-level PC mAP")
+        ax.set_title("Phenotypic consistency within treatment–dose\n(blue = FDR sig)")
         ax.axvline(x=0.5, color="gray", linestyle="--", alpha=0.5)
 
     plt.tight_layout()
@@ -1296,11 +1301,12 @@ def classify_effect_detectability(
 ) -> dict[str, Any]:
     """Classify a treatment into one of four effect-size x detectability quadrants.
 
-    Cohen's d (effect *magnitude*) and mAP (retrieval *consistency*, i.e.
+    Cohen's d (effect *magnitude*) and phenotypic-activity mAP (retrieval
+    *consistency* relative to negative-control references, i.e.
     detectability) answer different questions -- a small but highly
-    reproducible phenotype can score higher on mAP than a large but
+    reproducible phenotype can score higher on activity mAP than a large but
     heterogeneous one. Looking at either metric alone can't distinguish
-    these cases; the quadrant of (high/low d, high/low mAP) can.
+    these cases; the quadrant of (high/low d, high/low activity mAP) can.
 
     ``map_threshold=0.5`` matches the poscon-separation threshold already
     used elsewhere in this module (SC-22's "poscon mAP > 0.5" check);
@@ -1383,7 +1389,7 @@ def run_treatment_vs_control(
     if len(poscon_rows) > 0:
         poscon_pass = poscon_rows["mAP_vs_negcon"].min() > 0.5
         sc22_checks.append({
-            "check": "poscon_separation", "description": "Positive control mAP > 0.5",
+            "check": "poscon_separation", "description": "Positive-control activity mAP > 0.5",
             "value": float(poscon_rows["mAP_vs_negcon"].min()), "threshold": 0.5, "pass": poscon_pass,
         })
 
@@ -1423,8 +1429,8 @@ def plot_treatment_vs_control(tvc_result: dict, output_path: str | None = None):
     ax.barh(y_pos, plot_df["mAP_vs_negcon"], color=colors, alpha=0.8)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(plot_df["treatment"], fontsize=9)
-    ax.set_xlabel("mAP vs negative control")
-    ax.set_title("Treatment vs Control\n(green=poscon, blue=FDR sig, orange=not sig)")
+    ax.set_xlabel("Phenotypic-activity mAP vs negative control")
+    ax.set_title("Phenotypic activity: treatment vs control\n(green=poscon, blue=FDR sig, orange=not sig)")
     ax.axvline(x=0.5, color="gray", linestyle="--", alpha=0.5)
     for i, val in enumerate(plot_df["mAP_vs_negcon"]):
         ax.text(val + 0.01, i, f"{val:.3f}", va="center", fontsize=8)
@@ -1443,7 +1449,7 @@ def plot_treatment_vs_control(tvc_result: dict, output_path: str | None = None):
             fontsize=7, alpha=0.8, xytext=(5, _y_offset), textcoords="offset points",
         )
     ax.set_xlabel("Cohen's d (RMS) — effect magnitude")
-    ax.set_ylabel("mAP vs negcon — detectability")
+    ax.set_ylabel("Phenotypic-activity mAP vs negcon")
     ax.set_title("Effect magnitude vs. detectability\n(green=poscon)")
 
     # Quadrant guide: Cohen's d (magnitude) x mAP (detectability) answer
@@ -1477,8 +1483,8 @@ def plot_treatment_vs_control(tvc_result: dict, output_path: str | None = None):
     ax.barh(y_pos2, plot_df2["normalized_mAP"], color=norm_colors, alpha=0.8)
     ax.set_yticks(y_pos2)
     ax.set_yticklabels(plot_df2["treatment"], fontsize=9)
-    ax.set_xlabel("Normalized mAP")
-    ax.set_title("Phenotype Detectability\n(orange = no detectable phenotype)")
+    ax.set_xlabel("Normalized phenotypic-activity mAP")
+    ax.set_title("Phenotypic activity / detectability\n(orange = no detectable phenotype)")
     ax.axvline(x=0, color="black", linewidth=0.5)
     ax.axvline(x=0.05, color="red", linestyle="--", alpha=0.3)
     ax.axvline(x=-0.05, color="red", linestyle="--", alpha=0.3)
@@ -1598,19 +1604,19 @@ def plot_time_course(time_result: dict, output_path: str | None = None):
     axes[0].set_title("PR Over Time")
     axes[0].legend(fontsize=7)
     axes[1].set_xlabel("Time")
-    axes[1].set_ylabel("mAP")
-    axes[1].set_title("mAP Over Time")
+    axes[1].set_ylabel("PC mAP")
+    axes[1].set_title("Phenotypic consistency over time")
     axes[1].legend(fontsize=7)
     axes[1].set_ylim(0, 1.05)
 
     ax2 = axes[2]
     ax2_twin = ax2.twinx()
     ax2.plot(summary[time_col], summary["pr_fraction"], marker="o", color="#0279EE", linewidth=2, label="PR fraction")
-    ax2_twin.plot(summary[time_col], summary["mAP_copairs"], marker="s", color="#FF9400", linewidth=2, label="Mean mAP")
+    ax2_twin.plot(summary[time_col], summary["mAP_copairs"], marker="s", color="#FF9400", linewidth=2, label="Mean PC mAP")
     ax2.axvline(x=time_result["optimal_time"], color="red", linestyle="--", alpha=0.5, label=f"Optimal ({time_result['optimal_time']})")
     ax2.set_xlabel("Time")
     ax2.set_ylabel("PR fraction", color="#0279EE")
-    ax2_twin.set_ylabel("Mean mAP", color="#FF9400")
+    ax2_twin.set_ylabel("Mean PC mAP", color="#FF9400")
     ax2.set_title("Aggregate Quality Over Time")
     ax2.legend(fontsize=8, loc="upper left")
     ax2_twin.legend(fontsize=8, loc="upper right")
@@ -1775,15 +1781,26 @@ def plot_go_nogo_dashboard(dashboard: dict, output_path: str | None = None):
 
     ax = axes[1]
     plot_metrics = {}
+    _metric_labels = {
+        "mean_pr_fraction": "mean PR fraction",
+        "cross_plate_pr": "cross-plate PR",
+        "mean_treatment_map": "mean treatment PC mAP",
+        "poscon_map": "poscon activity mAP",
+    }
     for k in ["mean_pr_fraction", "cross_plate_pr", "mean_treatment_map", "poscon_map"]:
         v = metrics.get(k, np.nan)
         if isinstance(v, (int, float)) and not np.isnan(v):
-            plot_metrics[k.replace("_", " ").replace("pr fraction", "PR frac").replace("map", "mAP")] = v
+            plot_metrics[_metric_labels[k]] = v
 
     if plot_metrics:
         y_pos = np.arange(len(plot_metrics))
         bars = ax.barh(y_pos, list(plot_metrics.values()), color="#0279EE", alpha=0.8)
-        thresholds = {"PR frac": 0.25, "cross plate PR": 0.25, "mean treatment mAP": 0.5, "poscon mAP": 0.5}
+        thresholds = {
+            "mean PR fraction": 0.25,
+            "cross-plate PR": 0.25,
+            "mean treatment PC mAP": 0.5,
+            "poscon activity mAP": 0.5,
+        }
         for i, (label, val) in enumerate(plot_metrics.items()):
             bars[i].set_color("#75A025" if val >= thresholds.get(label, 0.5) else "#FF9400")
         ax.set_yticks(y_pos)

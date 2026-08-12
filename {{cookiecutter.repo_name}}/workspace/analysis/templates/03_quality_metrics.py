@@ -45,7 +45,25 @@ def _(mo):
     |--------|---------------------|-------|-------------|
     | **PR** (Percent Replicating) | What fraction of treatments show replicate consistency above null? | 0–1 | >0.25 (minimum), 0.84–0.94 (well-executed) |
     | **PM** (Percent Matching) | What fraction of profiles have their nearest neighbor be the same treatment? | 0–1 | >0.50 |
-    | **mAP** (Mean Average Precision) | How well can we retrieve a treatment's replicates from the full ranking? | 0–1 | >0.50, FDR-significant |
+    | **mAP** (Mean Average Precision) | Retrieval score whose biological meaning depends on how positive and negative pairs are defined (see below). | 0–1 | >0.50, FDR-significant |
+
+    ### Always qualify mAP by its profiling task
+
+    **mAP is a retrieval statistic, not a biological endpoint by itself.** In
+    every table and figure below it is therefore qualified as one of:
+
+    - **Phenotypic consistency (PC mAP):** positives are replicate profiles of
+      the same treatment (or the same treatment–dose); asks whether replicates
+      retrieve one another. Applications A–C use this meaning. In Application C,
+      PC mAP measures replicate consistency *within each dose*; dose ordering is
+      assessed separately by SC-21.
+    - **Phenotypic activity (activity mAP):** treatments are retrieved against
+      negative-control references; asks whether a reproducible phenotype is
+      detectable relative to control. Application D uses this meaning.
+    - **Phenotypic distinctiveness (MoA mAP):** positives share a mechanism of
+      action and negatives have a different MoA; asks whether MoA classes are
+      separable. **NB03 does not compute MoA mAP**, because no MoA-based positive
+      pair definition is used here.
 
     All of the metric logic (from-scratch Pearson implementations,
     `copairs`-based cosine implementations, and the four QC applications)
@@ -594,8 +612,8 @@ def _(
     print(f"\nMax per-treatment difference: {_impl['max_abs_diff']:.4f}")
     print(f"Implementation check: {'PASS' if _impl['agrees'] else 'INVESTIGATE'} "
           f"(threshold: ±{_impl['agreement_threshold']})")
-    print(f"copairs (Pearson) macro-average mAP: {_impl['map_copairs_macro']:.3f}")
-    print(f"From-scratch micro-average mAP:      {crossval_result['map_from_scratch_micro']:.3f}")
+    print(f"copairs (Pearson) macro-average PC mAP: {_impl['map_copairs_macro']:.3f}")
+    print(f"From-scratch micro-average PC mAP:      {crossval_result['map_from_scratch_micro']:.3f}")
 
     print("\n=== Sensitivity analysis: Pearson (from-scratch) vs cosine (copairs) ===\n")
     print("No pass/fail threshold — disagreement here reflects the similarity-metric")
@@ -606,7 +624,7 @@ def _(
         _row = _sens["per_treatment"][_trt]
         print(f"{_trt:<20} {_row['from_scratch']:>12.3f} {_row['copairs']:>10.3f} {_row['diff']:>8.3f}")
     print(f"\nMax per-treatment difference: {_sens['max_abs_diff']:.4f}")
-    print(f"copairs (cosine) macro-average mAP: {_sens['map_copairs_macro']:.3f}")
+    print(f"copairs (cosine) macro-average PC mAP: {_sens['map_copairs_macro']:.3f}")
     return
 
 
@@ -617,7 +635,8 @@ def _(mo):
 
     **Question:** Does each plate independently show replicate consistency?
 
-    For each plate: within-plate PR, within-plate PM, and within-plate mAP
+    For each plate: within-plate PR, within-plate PM, and within-plate
+    **phenotypic-consistency mAP (PC mAP)**
     (from-scratch + copairs, cross-validated). **SC-19**: negcon PR ≤
     threshold, poscon PR > threshold.
     """)
@@ -657,7 +676,7 @@ def _(
     print("\n--- Per-plate PR ---")
     print(qc_result["pr_results"][[CONFIG.plate_col, "treatment", "control_type",
         "median_corr", "null_threshold", "passes_pr"]].to_string(index=False))
-    print("\n--- mAP Cross-Validation ---")
+    print("\n--- Phenotypic-consistency mAP (PC mAP) Cross-Validation ---")
     print(qc_result["map_results"][[CONFIG.plate_col, "treatment",
         "mAP_from_scratch", "mAP_copairs", "mAP_diff"]].to_string(index=False))
     return (qc_result,)
@@ -679,6 +698,10 @@ def _(mo):
     `run_cross_plate_batch` returns a `{"message": ...}` sentinel and this
     section reports that it was skipped. **SC-20**: cross-plate PR drop
     below the configured threshold (non-critical / warning-level check).
+
+    Here, both within- and cross-plate mAP are **PC mAP**: positives are the
+    same treatment, with the cross-plate calculation requiring positives to
+    come from different plates.
     """)
     return
 
@@ -739,6 +762,11 @@ def _(mo):
     detected — otherwise skipped with a message. **SC-21**: adjacent doses
     should correlate higher than non-adjacent doses (monotonicity,
     non-critical / informational check).
+
+    The displayed dose-retrieval score is **PC mAP**: positives are replicates
+    of the same treatment–dose and negatives are other doses of that treatment.
+    It measures within-dose consistency, not dose monotonicity or MoA
+    distinctiveness.
     """)
     return
 
@@ -762,7 +790,7 @@ def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_dose_response):
         print("\n--- SC-21 ---")
         print(dose_result["sc21_status"].to_string(index=False))
         if dose_result["dose_map"] is not None:
-            print("\n--- Dose retrieval mAP ---")
+            print("\n--- Dose-level phenotypic-consistency mAP (PC mAP) ---")
             print(dose_result["dose_map"][["Metadata_Treatment_Dose", "mean_average_precision",
                 "corrected_p_value"]].to_string(index=False))
     return (dose_result,)
@@ -780,27 +808,28 @@ def _(mo):
     ## 7 — Application D: Treatment vs control separation
 
     **Question:** Can treatment profiles be distinguished from negative
-    controls? For each treatment: mAP vs negcon (copairs, reference
+    controls? For each treatment: **phenotypic-activity mAP** vs negcon
+    (copairs, reference
     indexing), FDR-corrected p-value, and Cohen's d effect size. **SC-22**:
-    poscon mAP should be high; treatments with mAP ≈ null have no
+    poscon activity mAP should be high; treatments with activity mAP ≈ null have no
     detectable phenotype.
 
-    **Cohen's d and mAP answer different questions.** Cohen's d measures
-    *effect magnitude* (how big is the change?); mAP measures
+    **Cohen's d and activity mAP answer different questions.** Cohen's d measures
+    *effect magnitude* (how big is the change?); activity mAP measures
     *detectability* (how consistently is that change recovered across
     replicates?). A small but highly reproducible phenotype can score
-    higher on mAP than a large but heterogeneous one — looking at either
+    higher on activity mAP than a large but heterogeneous one — looking at either
     metric alone can't distinguish these cases:
 
-    | | High mAP | Low mAP |
+    | | High activity mAP | Low activity mAP |
     |---|---|---|
     | **High Cohen's d** | Strong, consistent phenotype | Strong but heterogeneous phenotype |
     | **Low Cohen's d** | Subtle but reproducible phenotype | No detectable (or weak) phenotype |
 
-    - **High d + High mAP** — robust phenotypic signature: large and reproducible changes.
-    - **High d + Low mAP** — large effect size but heterogeneous response; the phenotype exists but isn't consistently recovered.
-    - **Low d + High mAP** — small but highly reproducible phenotype: subtle changes, consistently detected.
-    - **Low d + Low mAP** — no detectable phenotypic signature, or changes indistinguishable from the negative control.
+    - **High d + High activity mAP** — robust phenotypic signature: large and reproducible changes.
+    - **High d + Low activity mAP** — large effect size but heterogeneous response; the phenotype exists but isn't consistently recovered.
+    - **Low d + High activity mAP** — small but highly reproducible phenotype: subtle changes, consistently detected.
+    - **Low d + Low activity mAP** — no detectable phenotypic signature, or changes indistinguishable from the negative control.
     """)
     return
 
@@ -829,12 +858,12 @@ def _(
 
     _non_negcon = tvc_result["results"][~tvc_result["results"]["is_negcon"]]
     if len(_non_negcon) > 1:
-        print(f"\nCohen's d vs mAP correlation: r = {_non_negcon['cohens_d'].corr(_non_negcon['mAP_vs_negcon']):.3f}")
+        print(f"\nCohen's d vs phenotypic-activity mAP correlation: r = {_non_negcon['cohens_d'].corr(_non_negcon['mAP_vs_negcon']):.3f}")
 
     print("\n--- Effect magnitude x detectability quadrant (per treatment) ---")
     for _row in _non_negcon.itertuples(index=False):
         print(
-            f"  {_row.treatment:<20} d={_row.cohens_d:.3f}  mAP={_row.mAP_vs_negcon:.3f}  "
+            f"  {_row.treatment:<20} d={_row.cohens_d:.3f}  activity mAP={_row.mAP_vs_negcon:.3f}  "
             f"→ {_row.effect_detectability_quadrant}"
         )
     return (tvc_result,)
@@ -1048,9 +1077,9 @@ def _(EXPERIMENT_ID, RESULTS_DIR, dashboard):
         f"- Treatments: {dashboard['metric_summary']['n_treatments']}",
         f"- Mean PR fraction: {dashboard['metric_summary']['mean_pr_fraction']:.1%}",
         f"- Cross-plate PR: {dashboard['metric_summary']['cross_plate_pr']}",
-        f"- Mean treatment mAP: {dashboard['metric_summary']['mean_treatment_map']:.3f}",
+        f"- Mean treatment PC mAP: {dashboard['metric_summary']['mean_treatment_map']:.3f}",
         f"- FDR significant treatments: {dashboard['metric_summary']['n_fdr_significant']}",
-        f"- Positive control mAP: {dashboard['metric_summary']['poscon_map']}",
+        f"- Positive-control activity mAP: {dashboard['metric_summary']['poscon_map']}",
         "\n## Check Details",
     ]
     for _, _row in dashboard["checks"].iterrows():
@@ -1174,14 +1203,16 @@ def _(mo):
     mo.md(r"""
     ## Notebook complete
 
-    This notebook computed quality metrics (PR, PM, mAP) for the Live
+    This notebook computed quality metrics (PR, PM, and task-qualified mAP) for the Live
     Cell Painting experiment, from-scratch and via `copairs`, across four
     applications:
 
-    1. **Per-plate QC** — replicate consistency within each plate
-    2. **Cross-plate batch** — batch-effect detection across plates
-    3. **Dose-response** — consistency across concentration levels
-    4. **Treatment vs control** — phenotypic separation from negative controls
+    1. **Per-plate QC** — PC mAP: replicate consistency within each plate
+    2. **Cross-plate batch** — PC mAP: replicate consistency across plates
+    3. **Dose-response** — PC mAP within each treatment–dose; SC-21 for ordering
+    4. **Treatment vs control** — activity mAP: phenotype detection vs negcon
+
+    MoA-based phenotypic-distinctiveness mAP is not computed in NB03.
 
     combined into the SC-19 → SC-22 **Go/No-Go decision**.
 

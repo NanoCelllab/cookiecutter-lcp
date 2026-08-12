@@ -135,7 +135,7 @@ def _(mo):
 def _(Path):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
-    # workspace). __file__ is used instead of cwd so this notebook
+    # workspace/pipelines). __file__ is used instead of cwd so this notebook
     # behaves identically under `marimo edit`, a plain `python` run, or an
     # automated headless run from any working directory.
     import sys
@@ -153,9 +153,9 @@ def _(Path):
         )
 
     REPO_ROOT = _repo_root_candidate
-    _pipelines_dir = REPO_ROOT / "workspace"
-    if not (_pipelines_dir / "hca_pipeline").exists():
-        raise FileNotFoundError(f"hca_pipeline package directory not found: {_pipelines_dir / 'hca_pipeline'}")
+    _pipelines_dir = REPO_ROOT / "workspace" / "pipelines"
+    if not _pipelines_dir.exists():
+        raise FileNotFoundError(f"hca_pipeline package directory not found: {_pipelines_dir}")
     sys.path.insert(0, str(_pipelines_dir))
 
     from hca_pipeline.config import ExperimentConfig
@@ -1111,13 +1111,13 @@ def _(
     )
     for _bar, _value in zip(_bars, cell_count_regression_summary["mean_map"]):
         _ax.text(_bar.get_x() + _bar.get_width() / 2, _value, f"{_value:.3f}", ha="center", va="bottom")
-    _ax.set_ylabel("Mean average precision (copairs)")
-    _ax.set_title("Exploratory reproducibility before vs. after cell-count regression")
+    _ax.set_ylabel("Phenotypic-consistency mAP (copairs)")
+    _ax.set_title("Exploratory phenotypic consistency before vs. after cell-count regression")
     _ax.set_ylim(0, max(0.12, float(cell_count_regression_summary["mean_map"].max()) * 1.2))
     _fig.tight_layout()
     _fig.savefig(FIGS_DIR / "map_cell_count_regression_comparison.png", dpi=150, bbox_inches="tight")
     plt.close(_fig)
-    print("\nExploratory copairs mAP (cross-plate replicates when multiple plates are present):")
+    print("\nExploratory phenotypic-consistency mAP (cross-plate replicates when multiple plates are present):")
     print(cell_count_regression_summary.to_string(index=False))
     print("  ✓  Saved: map_cell_count_regression_comparison.png")
     print(f"  ✓  Saved diagnostics: {_comparison_dir}")
@@ -2848,17 +2848,17 @@ def _(
             )
             for t in _common:
                 _ax.annotate(t, (_map_by_treatment[t], _intra_median[t]), fontsize=7)
-            _ax.set_xlabel("NB03 mean average precision (copairs, cosine)")
+            _ax.set_xlabel("NB03 phenotypic-consistency mAP (copairs, cosine)")
             _ax.set_ylabel("Median intra-treatment Pearson similarity (this section)")
-            _ax.set_title("mAP vs. similarity-based replicate agreement")
+            _ax.set_title("Phenotypic-consistency mAP vs. replicate agreement")
             _fig.tight_layout()
             _fig.savefig(SIMILARITY_FIGS_DIR / "map_vs_similarity.png", dpi=300, bbox_inches="tight")
             plt.close(_fig)
             print(f"✓ Saved: map_vs_similarity.png ({len(_common)} treatments in common)")
         else:
-            print("NB03 mAP results found but no treatments in common — skipping comparison plot.")
+            print("NB03 phenotypic-consistency mAP results found but no treatments in common — skipping comparison plot.")
     else:
-        print(f"NB03 mAP results not found — run NB03 first for comparison ({_map_csv}).")
+        print(f"NB03 phenotypic-consistency mAP results not found — run NB03 first for comparison ({_map_csv}).")
     return
 
 
