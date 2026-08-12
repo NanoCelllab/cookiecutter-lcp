@@ -26,7 +26,8 @@ def _(mo):
 
     ## Input and output
 
-    **Current input mode:** legacy merged single-cell CSV
+    **Accepted raw inputs:** CellProfiler SQLite database(s), or one legacy
+    merged single-cell CSV
     **Primary output:** `single_cell_profiles.parquet`
     **Interoperability output:** `single_cell_profiles.csv`
     **QC outputs:** cell-count table, plate maps, feature-integrity report
@@ -35,7 +36,7 @@ def _(mo):
     ## Execution logic
 
     1. Configure the experiment (widgets below) and validate the choice.
-    2. Locate and read the experiment input.
+    2. Discover the available raw input and report what will be used.
     3. Reconstruct the plate-level datasets.
     4. Run blocking structural validations (SC-01 → SC-03).
     5. Report non-blocking cell-count QC findings (SC-04).
@@ -69,6 +70,7 @@ def _():
     import json
     import platform
     import re
+    import sqlite3
     import subprocess
     from dataclasses import replace
     from datetime import datetime, timezone
@@ -95,6 +97,7 @@ def _():
         plt,
         re,
         replace,
+        sqlite3,
         subprocess,
         timezone,
     )
@@ -347,33 +350,85 @@ def _(mo):
     mo.md(r"""
     ## 2 — Locate and validate the experiment input
 
-    This experiment predates the SQLite-per-plate workflow, so it is
-    loaded from one previously merged single-cell CSV. Rather than
-    hardcoding the CSV's file name, this cell requires exactly one CSV
-    to be present in the experiment's database folder — that keeps the
-    notebook agnostic to what any given legacy dataset happens to be
-    named.
+    The notebook first looks for CellProfiler SQLite databases (`.db`,
+    `.sqlite`, or `.sqlite3`) and falls back to one legacy merged CSV.
+
+    `single_cell_profiles.parquet` is the **first output of this notebook**.
+    It is therefore completely normal for it not to exist on the first run;
+    its absence is reported as information, never as an input error.
     """)
     return
 
 
 @app.cell
-def _(DB_ROOT):
+def _(DB_ROOT, OUTPUT_PARQUET, mo):
+    _candidate_databases = sorted(
+        p
+        for pattern in ("*.db", "*.sqlite", "*.sqlite3")
+        for p in DB_ROOT.glob(pattern)
+    ) if DB_ROOT.is_dir() else []
     _candidate_csvs = sorted(DB_ROOT.glob("*.csv")) if DB_ROOT.is_dir() else []
-    if len(_candidate_csvs) != 1:
-        raise FileNotFoundError(
-            "Expected exactly one legacy single-cell CSV in "
-            f"{DB_ROOT}, found {len(_candidate_csvs)}: "
-            f"{[p.name for p in _candidate_csvs]}"
+
+    if _candidate_databases:
+        INPUT_KIND = "sqlite"
+        INPUT_FILES = _candidate_databases
+        _source_message = (
+            f"Found **{len(INPUT_FILES)} CellProfiler database(s)**. "
+            "They will be merged into one single-cell table."
         )
-    LEGACY_SINGLE_CELL_CSV = _candidate_csvs[0]
-    print("✓ Legacy single-cell input located")
-    print(f"  File: {LEGACY_SINGLE_CELL_CSV}")
-    return (LEGACY_SINGLE_CELL_CSV,)
+    elif len(_candidate_csvs) == 1:
+        INPUT_KIND = "csv"
+        INPUT_FILES = _candidate_csvs
+        _source_message = "Found **one legacy merged single-cell CSV**."
+    elif len(_candidate_csvs) > 1:
+        INPUT_KIND = "ambiguous"
+        INPUT_FILES = []
+        _source_message = (
+            "Found more than one CSV and cannot choose safely: "
+            + ", ".join(p.name for p in _candidate_csvs)
+        )
+    else:
+        INPUT_KIND = "missing"
+        INPUT_FILES = []
+        _source_message = (
+            f"No CellProfiler database or legacy CSV was found in `{DB_ROOT}`."
+        )
+
+    _parquet_message = (
+        f"An earlier output exists at `{OUTPUT_PARQUET}`; it will be protected "
+        "from silent overwrite."
+        if OUTPUT_PARQUET.exists()
+        else "No previous parquet exists yet — this is the expected state on the first run."
+    )
+    _kind = "success" if INPUT_KIND in {"sqlite", "csv"} else "danger"
+    _discovery_callout = mo.callout(
+        mo.md(
+            f"**Input discovery**\n\n{_source_message}\n\n"
+            f"**Output checkpoint**\n\n{_parquet_message}"
+        ),
+        kind=_kind,
+    )
+    mo.stop(
+        INPUT_KIND in {"missing", "ambiguous"},
+        mo.vstack(
+            [
+                _discovery_callout,
+                mo.callout(
+                    mo.md(
+                        "Add one or more CellProfiler `.db` files, or exactly one legacy "
+                        f"CSV, to `{DB_ROOT}`, then rerun this cell."
+                    ),
+                    kind="danger",
+                ),
+            ]
+        ),
+    )
+    _discovery_callout
+    return INPUT_FILES, INPUT_KIND
 
 
 @app.cell
-def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd):
+def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd, sqlite3):
     def read_legacy_single_cell_csv(csv_path: Path) -> pd.DataFrame:
         """Read and validate a previously generated single-cell profile CSV.
 
@@ -475,7 +530,90 @@ def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd):
 
         return df
 
-    return (read_legacy_single_cell_csv,)
+    def read_cellprofiler_sqlite(sqlite_path: Path) -> pd.DataFrame:
+        """Merge CellProfiler image/cell/cytoplasm/nuclei tables."""
+        sqlite_path = Path(sqlite_path)
+        file_size_mb = sqlite_path.stat().st_size / (1024**2)
+        print(f"  Opening {sqlite_path.name} ({file_size_mb:,.1f} MB)", flush=True)
+
+        with sqlite3.connect(sqlite_path) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {"Per_Image", "Per_Cells", "Per_Cytoplasm", "Per_Nuclei"}
+            missing = sorted(required - tables)
+            if missing:
+                raise ValueError(
+                    f"{sqlite_path.name} is missing required CellProfiler table(s): "
+                    + ", ".join(missing)
+                )
+
+            print("    Reading image metadata", flush=True)
+            image_columns = [
+                row[1] for row in connection.execute("PRAGMA table_info(Per_Image)")
+            ]
+            selected_image_columns = [
+                column
+                for column in image_columns
+                if column == "ImageNumber" or column.startswith("Image_Metadata_")
+            ]
+            image = pd.read_sql_query(
+                "SELECT " + ", ".join(f'\"{c}\"' for c in selected_image_columns) + " FROM Per_Image",
+                connection,
+            ).rename(columns=lambda c: c.removeprefix("Image_") if c != "ImageNumber" else c)
+
+            cytoplasm_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(Per_Cytoplasm)")
+            }
+            nucleus_parent_column = next(
+                (
+                    column
+                    for column in (
+                        "Cytoplasm_Parent_Nuclei",
+                        "Cytoplasm_Parent_NucleiWithBorders",
+                    )
+                    if column in cytoplasm_columns
+                ),
+                None,
+            )
+            if nucleus_parent_column is None:
+                raise ValueError(
+                    f"{sqlite_path.name}: Per_Cytoplasm has no supported nucleus-parent column."
+                )
+
+            print("    Reading Cells measurements", flush=True)
+            cells = pd.read_sql_query("SELECT * FROM Per_Cells", connection)
+            print("    Reading Cytoplasm measurements", flush=True)
+            cytoplasm = pd.read_sql_query("SELECT * FROM Per_Cytoplasm", connection)
+            print("    Reading Nuclei measurements", flush=True)
+            nuclei = pd.read_sql_query("SELECT * FROM Per_Nuclei", connection)
+
+        merged = cells.merge(
+            cytoplasm,
+            left_on=["ImageNumber", "Cells_Number_Object_Number"],
+            right_on=["ImageNumber", "Cytoplasm_Parent_Cells"],
+            how="inner",
+            validate="one_to_one",
+        ).merge(
+            nuclei,
+            left_on=["ImageNumber", nucleus_parent_column],
+            right_on=["ImageNumber", "Nuclei_Number_Object_Number"],
+            how="inner",
+            validate="one_to_one",
+        ).merge(image, on="ImageNumber", how="left", validate="many_to_one")
+
+        if merged.empty:
+            raise ValueError(f"{sqlite_path.name}: compartment merge produced no cells.")
+        merged = ensure_core_metadata(dedupe_meta(merged))
+        merged["Metadata_Plate"] = merged["Metadata_Plate"].astype("string").str.strip()
+        merged["Metadata_Well"] = merged["Metadata_Well"].map(norm_well)
+        print(f"    ✓ {len(merged):,} cells × {merged.shape[1]:,} columns", flush=True)
+        return merged
+
+    return read_cellprofiler_sqlite, read_legacy_single_cell_csv
 
 
 @app.cell
@@ -499,8 +637,41 @@ def _(mo):
 
 
 @app.cell
-def _(LEGACY_SINGLE_CELL_CSV, RESULTS_DIR, pd, read_legacy_single_cell_csv):
-    df_all = read_legacy_single_cell_csv(LEGACY_SINGLE_CELL_CSV)
+def _(
+    INPUT_FILES,
+    INPUT_KIND,
+    RESULTS_DIR,
+    mo,
+    pd,
+    read_cellprofiler_sqlite,
+    read_legacy_single_cell_csv,
+):
+    print("═" * 72, flush=True)
+    print("LOADING SINGLE-CELL PROFILES", flush=True)
+    print("═" * 72, flush=True)
+    try:
+        if INPUT_KIND == "sqlite":
+            _loaded_parts = []
+            for _index, _path in enumerate(INPUT_FILES, start=1):
+                print(f"[{_index}/{len(INPUT_FILES)}] {_path.name}", flush=True)
+                _loaded_parts.append(read_cellprofiler_sqlite(_path))
+            df_all = pd.concat(_loaded_parts, ignore_index=True, sort=False)
+        else:
+            df_all = read_legacy_single_cell_csv(INPUT_FILES[0])
+    except Exception as _error:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**Input loading failed**\n\n"
+                    f"`{type(_error).__name__}: {_error}`\n\n"
+                    "The pipeline stopped here, so downstream cells will not emit "
+                    "secondary/cascading errors."
+                ),
+                kind="danger",
+            ),
+        )
+    print(f"✓ Input loaded: {len(df_all):,} cells total", flush=True)
 
     _excluded_sites_csv = RESULTS_DIR / "image_quality" / "excluded_sites.csv"
     if not _excluded_sites_csv.exists():
