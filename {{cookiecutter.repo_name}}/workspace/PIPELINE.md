@@ -419,6 +419,8 @@ reference notebooks are still openable if you want to compare against the
 pre-marimo version of a given step; they aren't required to run the current
 pipeline.
 
-Install with: `pixi install`. Edit or run a notebook with
+Install with: `pixi install`, then install the browser runtime used for PDF
+reports with `pixi run install-browser`, and verify imports with
+`pixi run check`. Edit or run a notebook with
 `pixi run marimo edit <path>` / `pixi run python3 <path>` (see
 [Marimo Notebooks](#marimo-notebooks) above).

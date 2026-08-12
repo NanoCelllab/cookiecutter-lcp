@@ -100,6 +100,8 @@ Install environment:
 
 ```bash
 pixi install
+pixi run install-browser  # installs Chromium for PDF report export
+pixi run check
 ```
 
 Edit a notebook (marimo, reactive editor in the browser):
@@ -120,7 +122,7 @@ Start JupyterLab (only needed for legacy `.ipynb` files, if any remain):
 pixi run lab
 ```
 
-Check environment:
+Check the environment again when needed:
 
 ```bash
 pixi run check
@@ -211,4 +213,3 @@ are shared/imported, not copied.
 - pycytominer: https://github.com/cytomining/pycytominer
 - Cell Painting Gallery: https://broadinstitute.github.io/cellpainting-gallery/data_structure.html
 - REDU (Unicamp): https://redu.unicamp.br
-

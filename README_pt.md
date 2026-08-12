@@ -95,6 +95,8 @@ Instalar o ambiente:
 
 ```bash
 pixi install
+pixi run install-browser  # instala o Chromium usado na exportação de PDFs
+pixi run check
 ```
 
 Editar um notebook (marimo, editor reativo no navegador):
@@ -115,7 +117,7 @@ Abrir o JupyterLab (necessário apenas para eventuais `.ipynb` legados):
 pixi run lab
 ```
 
-Testar o ambiente:
+Testar novamente o ambiente, quando necessário:
 
 ```bash
 pixi run check
@@ -206,4 +208,3 @@ e são compartilhados/importados, não copiados.
 - pycytominer: https://github.com/cytomining/pycytominer
 - Cell Painting Gallery: https://broadinstitute.github.io/cellpainting-gallery/data_structure.html
 - REDU (Unicamp): https://redu.unicamp.br
-

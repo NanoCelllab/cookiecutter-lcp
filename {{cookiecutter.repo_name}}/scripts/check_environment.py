@@ -22,6 +22,7 @@ packages = [
     "tifffile",
     "PIL",
     "joblib",
+    "playwright.sync_api",
 ]
 
 for package in packages:
