@@ -442,21 +442,33 @@ def _(mo):
 
 
 @app.cell
-def _(PROFILES_DIR, pd):
+def _(PROFILES_DIR, mo, pd):
     _candidate_paths = [
         PROFILES_DIR / "outputs" / "per_well_features_selected.parquet",
         PROFILES_DIR / "outputs" / "per_well_features_selected_merged.parquet",
     ]
     INPUT_PATH = next((p for p in _candidate_paths if p.exists()), None)
-    if INPUT_PATH is None:
-        raise FileNotFoundError(
-            "Could not find per_well_features_selected(.parquet|_merged.parquet) in "
-            f"{PROFILES_DIR / 'outputs'}. Run NB02 first."
-        )
+    _checked_paths = "\n".join(f"- `{path}`" for path in _candidate_paths)
+    mo.stop(
+        INPUT_PATH is None,
+        mo.callout(
+            mo.md(
+                "**NB03 stopped before loading data.**\n\n"
+                "The feature-selected parquet produced by NB02 was not found. "
+                "This is a missing prerequisite, not a failure in the QC calculations.\n\n"
+                f"Paths checked:\n{_checked_paths}\n\n"
+                "Run `02_aggregate_normalize_featureselect.py` to completion, confirm "
+                "that its final integrity check passes, and then rerun this cell. "
+                "Downstream cells were intentionally stopped to avoid cascading errors."
+            ),
+            kind="warn",
+        ),
+    )
 
-    print(f"Loading: {INPUT_PATH}")
+    print("✓ NB02 prerequisite located")
+    print(f"  Loading: {INPUT_PATH}")
     df = pd.read_parquet(INPUT_PATH)
-    print(f"Shape: {df.shape[0]} wells × {df.shape[1]} columns")
+    print(f"  ✓ Loaded {df.shape[0]:,} wells × {df.shape[1]:,} columns")
     return (df,)
 
 
@@ -684,7 +696,10 @@ def _(
 
 @app.cell
 def _(CONFIG, FIGS_DIR, plot_per_plate_qc, qc_result):
-    plot_per_plate_qc(qc_result, CONFIG.plate_col, output_path=str(FIGS_DIR / "app_a_per_plate_qc.png"))
+    _output_path = FIGS_DIR / "app_a_per_plate_qc.png"
+    _figure = plot_per_plate_qc(qc_result, CONFIG.plate_col, output_path=str(_output_path))
+    print(f"✓ Application A figure saved: {_output_path}")
+    _figure
     return
 
 
@@ -747,7 +762,10 @@ def _(
 
 @app.cell
 def _(FIGS_DIR, batch_result, plot_cross_plate_batch):
-    plot_cross_plate_batch(batch_result, output_path=str(FIGS_DIR / "app_b_cross_plate_batch.png"))
+    _output_path = FIGS_DIR / "app_b_cross_plate_batch.png"
+    _figure = plot_cross_plate_batch(batch_result, output_path=str(_output_path))
+    print(f"✓ Application B figure saved: {_output_path}" if _figure is not None else "ℹ Application B figure not generated because the analysis was skipped.")
+    _figure
     return
 
 
@@ -798,7 +816,10 @@ def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_dose_response):
 
 @app.cell
 def _(FIGS_DIR, dose_result, plot_dose_response):
-    plot_dose_response(dose_result, output_path=str(FIGS_DIR / "app_c_dose_response.png"))
+    _output_path = FIGS_DIR / "app_c_dose_response.png"
+    _figure = plot_dose_response(dose_result, output_path=str(_output_path))
+    print(f"✓ Application C figure saved: {_output_path}" if _figure is not None else "ℹ Application C figure not generated because the analysis was skipped.")
+    _figure
     return
 
 
@@ -871,7 +892,10 @@ def _(
 
 @app.cell
 def _(FIGS_DIR, plot_treatment_vs_control, tvc_result):
-    plot_treatment_vs_control(tvc_result, output_path=str(FIGS_DIR / "app_d_treatment_vs_control.png"))
+    _output_path = FIGS_DIR / "app_d_treatment_vs_control.png"
+    _figure = plot_treatment_vs_control(tvc_result, output_path=str(_output_path))
+    print(f"✓ Application D figure saved: {_output_path}")
+    _figure
     return
 
 
@@ -923,7 +947,10 @@ def _(
 
 @app.cell
 def _(FIGS_DIR, plot_time_course, time_result):
-    plot_time_course(time_result, output_path=str(FIGS_DIR / "section8_time_course.png"))
+    _output_path = FIGS_DIR / "section8_time_course.png"
+    _figure = plot_time_course(time_result, output_path=str(_output_path))
+    print(f"✓ Time-course figure saved: {_output_path}" if _figure is not None else "ℹ Time-course figure not generated because the analysis was skipped.")
+    _figure
     return
 
 
@@ -983,7 +1010,10 @@ def _(
 
 @app.cell
 def _(FIGS_DIR, dashboard, plot_go_nogo_dashboard):
-    plot_go_nogo_dashboard(dashboard, output_path=str(FIGS_DIR / "section9_go_nogo_dashboard.png"))
+    _output_path = FIGS_DIR / "section9_go_nogo_dashboard.png"
+    _figure = plot_go_nogo_dashboard(dashboard, output_path=str(_output_path))
+    print(f"✓ Go/No-Go dashboard figure saved: {_output_path}")
+    _figure
     return
 
 

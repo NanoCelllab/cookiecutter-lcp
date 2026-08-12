@@ -78,6 +78,17 @@ Go/No-Go decision based on:
 
 ## Marimo Notebooks
 
+Create the per-experiment workspace before opening a notebook:
+
+```bash
+pixi run new-experiment <EXPERIMENT_ID>
+```
+
+This safely copies every `.py` template into
+`workspace/analysis/<EXPERIMENT_ID>/analysis/`, creates the associated working
+directories, and refuses to overwrite an existing analysis. Place CellProfiler
+outputs under `workspace/backend/<EXPERIMENT_ID>/` afterward.
+
 Every notebook is a plain Python file (`app = marimo.App()`, one function per
 cell), not a `.ipynb`. This matters for how you work with them:
 

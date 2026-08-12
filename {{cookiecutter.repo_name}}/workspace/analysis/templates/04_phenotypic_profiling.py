@@ -138,7 +138,9 @@ def _(Path):
     # workspace/pipelines). __file__ is used instead of cwd so this notebook
     # behaves identically under `marimo edit`, a plain `python` run, or an
     # automated headless run from any working directory.
+    import os
     import sys
+    import tempfile
 
     _notebook_path = Path(__file__).resolve()
     _repo_root_candidate = None
@@ -153,10 +155,19 @@ def _(Path):
         )
 
     REPO_ROOT = _repo_root_candidate
-    _pipelines_dir = REPO_ROOT / "workspace" / "pipelines"
-    if not _pipelines_dir.exists():
-        raise FileNotFoundError(f"hca_pipeline package directory not found: {_pipelines_dir}")
+    _pipelines_dir = REPO_ROOT / "workspace"
+    _package_dir = _pipelines_dir / "hca_pipeline"
+    if not (_package_dir / "__init__.py").is_file():
+        raise FileNotFoundError(
+            f"hca_pipeline package not found: {_package_dir}. "
+            "Expected workspace/hca_pipeline/__init__.py."
+        )
     sys.path.insert(0, str(_pipelines_dir))
+    print(f"  ✓ Python package path configured: {_package_dir}")
+    _numba_cache_dir = Path(tempfile.gettempdir()) / "hca_pipeline_numba_cache"
+    _numba_cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["NUMBA_CACHE_DIR"] = str(_numba_cache_dir)
+    print(f"  ✓ Numba cache configured: {_numba_cache_dir}")
 
     from hca_pipeline.config import ExperimentConfig
     from hca_pipeline.feature_select import infer_feature_cols
@@ -540,6 +551,11 @@ def _(CONFIG, df_loaded, infer_feature_cols):
     print("\nTreatment distribution:")
     print(df_loaded[CONFIG.treatment_col].value_counts().to_string())
     print(f"\nPlates: {sorted(df_loaded[CONFIG.plate_col].unique())}")
+    if df_loaded[CONFIG.plate_col].nunique(dropna=False) < 2:
+        print(
+            "ℹ Single-plate experiment detected: batch correction is neither necessary nor "
+            "identifiable. Select only 'uncorrected' when possible; Harmony will be skipped automatically."
+        )
     return feat_cols, meta_cols
 
 
@@ -802,7 +818,16 @@ def _(mo):
 
 @app.cell
 def _(FIGS_DIR, N_PCA_COMPONENTS, PCA, RANDOM_STATE, X, np, plt):
-    pca_full = PCA(n_components=min(N_PCA_COMPONENTS, X.shape[1]), random_state=RANDOM_STATE)
+    _max_pca_components = min(X.shape[0], X.shape[1])
+    _n_pca_components = min(N_PCA_COMPONENTS, _max_pca_components)
+    if _n_pca_components < N_PCA_COMPONENTS:
+        print(
+            f"ℹ PCA components reduced from {N_PCA_COMPONENTS} to {_n_pca_components}: "
+            f"the input has {X.shape[0]} wells × {X.shape[1]} features."
+        )
+    else:
+        print(f"✓ PCA configured with {_n_pca_components} components.")
+    pca_full = PCA(n_components=_n_pca_components, random_state=RANDOM_STATE)
     X_pca = pca_full.fit_transform(X)
 
     _fig, _ax = plt.subplots(figsize=(9, 4))
@@ -982,7 +1007,9 @@ def _(
 ):
     from matplotlib.colors import LogNorm as _LogNorm
 
-    pca_cell_count_regressed = PCA(n_components=min(X_pca.shape[1], X.shape[1]), random_state=RANDOM_STATE)
+    _n_regressed_components = min(X_pca.shape[1], X_cell_count_regressed.shape[0], X_cell_count_regressed.shape[1])
+    print(f"✓ Cell-count-regressed PCA configured with {_n_regressed_components} components.")
+    pca_cell_count_regressed = PCA(n_components=_n_regressed_components, random_state=RANDOM_STATE)
     X_pca_cell_count_regressed = pca_cell_count_regressed.fit_transform(X_cell_count_regressed)
     _log_count = np.log10(np.clip(np.asarray(well_cell_counts, dtype=float), 1, None))
 
@@ -1017,7 +1044,10 @@ def _(
         _ax.set_title(_title)
         _ax.set_xlabel(f"PC1 ({_model.explained_variance_ratio_[0]:.1%})")
         _ax.set_ylabel(f"PC2 ({_model.explained_variance_ratio_[1]:.1%})")
-    _fig.colorbar(_sc, ax=_axes[0, :].tolist(), label="Number of cells per well")
+    # Keep the shared scale outside the plotting grid so it never obscures data.
+    _fig.subplots_adjust(right=0.86)
+    _colorbar_ax = _fig.add_axes([0.89, 0.56, 0.018, 0.28])
+    _fig.colorbar(_sc, cax=_colorbar_ax, label="Number of cells per well")
 
     scatter_panel(
         _axes[1, 0], X_pca[:, 0], X_pca[:, 1],
@@ -1035,7 +1065,7 @@ def _(
         f"Exploratory cell-count regression ({cell_count_regression_mode_input.value})",
         fontsize=13, fontweight="bold",
     )
-    _fig.subplots_adjust(top=0.92, hspace=0.28, wspace=0.20)
+    _fig.subplots_adjust(top=0.92, right=0.86, hspace=0.28, wspace=0.20)
     _fig.savefig(FIGS_DIR / "pca_cell_count_regression_comparison.png", dpi=150, bbox_inches="tight")
     plt.close(_fig)
     print(cell_count_pca_comparison.to_string(index=False))
@@ -1383,43 +1413,52 @@ def _(
     # concern.
     X_pca_harmony = None
     if "harmony" in RUN_ANALYSIS_SPACES:
-        try:
-            import harmonypy as hm
-        except ImportError as _error:
-            raise ImportError(
-                "Harmony analysis was requested, but harmonypy is not installed. "
-                "Add harmonypy to the Pixi environment and rerun."
-            ) from _error
-
         _harmony_meta = df[[CONFIG.plate_col]].astype(str).reset_index(drop=True)
-        _harmony_result = hm.run_harmony(
-            X_pca, _harmony_meta, vars_use=[CONFIG.plate_col], random_state=RANDOM_STATE, verbose=False,
-        )
-
-        _harmony_raw = np.asarray(_harmony_result.Z_corr)
-        if _harmony_raw.shape == X_pca.shape:
-            X_pca_harmony = _harmony_raw
-        elif _harmony_raw.T.shape == X_pca.shape:
-            X_pca_harmony = _harmony_raw.T
-        else:
-            raise ValueError(
-                f"Unexpected Harmony output shape. Input PCA shape: {X_pca.shape}, "
-                f"Harmony raw shape: {_harmony_raw.shape}"
+        _n_harmony_batches = _harmony_meta[CONFIG.plate_col].nunique(dropna=False)
+        if _n_harmony_batches < 2:
+            X_pca_harmony = X_pca.copy()
+            print(
+                "ℹ Batch correction skipped: only one plate was detected. "
+                "Harmony requires at least two batches; the uncorrected PCA coordinates "
+                "will be reused so the notebook can continue."
             )
+        else:
+            try:
+                import harmonypy as hm
+            except ImportError as _error:
+                raise ImportError(
+                    "Harmony analysis was requested, but harmonypy is not installed. "
+                    "Add harmonypy to the Pixi environment and rerun."
+                ) from _error
+            print(f"Running Harmony across {_n_harmony_batches} plates...")
+            _harmony_result = hm.run_harmony(
+                X_pca, _harmony_meta, vars_use=[CONFIG.plate_col], random_state=RANDOM_STATE, verbose=False,
+            )
+            _harmony_raw = np.asarray(_harmony_result.Z_corr)
+            if _harmony_raw.shape == X_pca.shape:
+                X_pca_harmony = _harmony_raw
+            elif _harmony_raw.T.shape == X_pca.shape:
+                X_pca_harmony = _harmony_raw.T
+            else:
+                raise ValueError(
+                    f"Unexpected Harmony output shape. Input PCA shape: {X_pca.shape}, "
+                    f"Harmony raw shape: {_harmony_raw.shape}"
+                )
         if X_pca_harmony.shape[0] != len(df):
             raise ValueError("Harmony output does not match the number of wells.")
 
-        _harmony_coordinates_df = pd.DataFrame(
-            X_pca_harmony,
-            columns=[f"Harmony_PC{i + 1}" for i in range(X_pca_harmony.shape[1])],
-            index=df.index,
-        )
-        _harmony_coordinates_df = pd.concat([df[meta_cols], _harmony_coordinates_df], axis=1)
-        _harmony_path = validate_output_path(
-            SPACE_DIRECTORIES["harmony"]["results"] / "harmony_coordinates.csv", OVERWRITE_EXISTING_OUTPUTS
-        )
-        _status = write_csv_protected(_harmony_coordinates_df, _harmony_path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
-        print(f"Harmony-corrected matrix: {X_pca_harmony.shape} ({_status})")
+        if _n_harmony_batches >= 2:
+            _harmony_coordinates_df = pd.DataFrame(
+                X_pca_harmony,
+                columns=[f"Harmony_PC{i + 1}" for i in range(X_pca_harmony.shape[1])],
+                index=df.index,
+            )
+            _harmony_coordinates_df = pd.concat([df[meta_cols], _harmony_coordinates_df], axis=1)
+            _harmony_path = SPACE_DIRECTORIES["harmony"]["results"] / "harmony_coordinates.csv"
+            _status = write_csv_protected(_harmony_coordinates_df, _harmony_path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
+            print(f"Harmony-corrected matrix: {X_pca_harmony.shape} ({_status})")
+        else:
+            print("  ↳ No harmony_coordinates.csv was written; any existing file was left untouched.")
 
     X_pca_combat = None
     if "combat" in RUN_ANALYSIS_SPACES:
@@ -1535,8 +1574,23 @@ def _(
         if values is not None:
             coord_df = pd.DataFrame(values, columns=columns, index=df.index)
             out_df = pd.concat([out_df, coord_df], axis=1)
-        path = validate_output_path(directories_key / filename, OVERWRITE_EXISTING_OUTPUTS)
+        path = directories_key / filename
         return write_csv_protected(out_df, path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
+
+    def _save_figure_protected(fig, path, **kwargs):
+        existed = path.exists()
+        if existed and not OVERWRITE_EXISTING_OUTPUTS:
+            print(f"  ↳ {path.name} unchanged (existing figure preserved)")
+            return "unchanged"
+        fig.savefig(path, **kwargs)
+        return "replaced" if existed else "created"
+
+    def _dump_model_protected(model, path):
+        if path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+            print(f"  ↳ {path.name} unchanged (existing model preserved)")
+            return "unchanged"
+        joblib.dump(model, path)
+        return "saved"
 
     analysis_results = {}
     _figures_to_display = []
@@ -1566,7 +1620,7 @@ def _(
 
         # ── Re-export tables with the full metadata column set ─────────────
         _status = write_csv_protected(
-            _result["qc"], validate_output_path(_directories["results"] / "multivariate_qc.csv", OVERWRITE_EXISTING_OUTPUTS),
+            _result["qc"], _directories["results"] / "multivariate_qc.csv",
             overwrite=OVERWRITE_EXISTING_OUTPUTS,
         )
         print(f"  ✓ multivariate_qc.csv {_status}")
@@ -1590,9 +1644,8 @@ def _(
                 _ax.set_ylabel("UMAP 2")
             _fig.suptitle(f"UMAP — {_space['label']}", fontweight="bold")
             _fig.tight_layout()
-            _fig.savefig(
-                validate_output_path(_directories["embeddings"] / "umap.png", OVERWRITE_EXISTING_OUTPUTS),
-                dpi=150, bbox_inches="tight",
+            _status = _save_figure_protected(
+                _fig, _directories["embeddings"] / "umap.png", dpi=150, bbox_inches="tight"
             )
             plt.close(_fig)
             _figures_to_display.append(_fig)
@@ -1601,15 +1654,12 @@ def _(
         if isinstance(_treatment_lda.get("cv"), pd.DataFrame):
             _status = write_csv_protected(
                 _treatment_lda["cv"],
-                validate_output_path(_directories["results"] / "treatment_lda_cv.csv", OVERWRITE_EXISTING_OUTPUTS),
+                _directories["results"] / "treatment_lda_cv.csv",
                 overwrite=OVERWRITE_EXISTING_OUTPUTS,
             )
             print(f"  ✓ treatment_lda_cv.csv {_status}")
         if _treatment_lda.get("model") is not None:
-            joblib.dump(
-                _treatment_lda["model"],
-                validate_output_path(_directories["models"] / "lda_treatment.pkl", OVERWRITE_EXISTING_OUTPUTS),
-            )
+            _dump_model_protected(_treatment_lda["model"], _directories["models"] / "lda_treatment.pkl")
 
         _dose_lda = _result.get("dose_lda", {})
         if _dose_lda.get("X_lda") is not None:
@@ -1622,14 +1672,17 @@ def _(
             if isinstance(_dose_lda.get("cv"), pd.DataFrame):
                 _status = write_csv_protected(
                     _dose_lda["cv"],
-                    validate_output_path(_directories["results"] / "dose_lda_cv.csv", OVERWRITE_EXISTING_OUTPUTS),
+                    _directories["results"] / "dose_lda_cv.csv",
                     overwrite=OVERWRITE_EXISTING_OUTPUTS,
                 )
                 print(f"  ✓ dose_lda_cv.csv {_status}")
             if _dose_lda.get("confusion_matrix") is not None:
-                _cm_path = validate_output_path(_directories["results"] / "confusion_matrix.csv", OVERWRITE_EXISTING_OUTPUTS)
-                _dose_lda["confusion_matrix"].to_csv(_cm_path)
-                print("  ✓ confusion_matrix.csv written")
+                _cm_path = _directories["results"] / "confusion_matrix.csv"
+                if _cm_path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+                    print("  ↳ confusion_matrix.csv unchanged (existing file preserved)")
+                else:
+                    _dose_lda["confusion_matrix"].to_csv(_cm_path)
+                    print("  ✓ confusion_matrix.csv written")
 
             _fig, _axes = plt.subplots(1, 2, figsize=(14, 5))
             scatter_panel(_axes[0], _dose_lda["X_lda"][:, 0], _dose_lda["X_lda"][:, 1],
@@ -1641,17 +1694,13 @@ def _(
                 _ax.set_ylabel("LD2")
             _fig.suptitle(f"Dose-level LDA — {_space['label']}", fontweight="bold")
             _fig.tight_layout()
-            _fig.savefig(
-                validate_output_path(_directories["lda"] / "lda_dose.png", OVERWRITE_EXISTING_OUTPUTS),
-                dpi=150, bbox_inches="tight",
+            _status = _save_figure_protected(
+                _fig, _directories["lda"] / "lda_dose.png", dpi=150, bbox_inches="tight"
             )
             plt.close(_fig)
             _figures_to_display.append(_fig)
         if _dose_lda.get("model") is not None:
-            joblib.dump(
-                _dose_lda["model"],
-                validate_output_path(_directories["models"] / "lda_dose.pkl", OVERWRITE_EXISTING_OUTPUTS),
-            )
+            _dump_model_protected(_dose_lda["model"], _directories["models"] / "lda_dose.pkl")
 
         _clustering = _result.get("clustering", {})
         if _clustering.get("labels") is not None:
@@ -1661,14 +1710,11 @@ def _(
             )
             print(f"  ✓ clustering_results.csv {_status}")
         if _clustering.get("model") is not None:
-            joblib.dump(
-                _clustering["model"],
-                validate_output_path(_directories["models"] / "kmeans.pkl", OVERWRITE_EXISTING_OUTPUTS),
-            )
+            _dump_model_protected(_clustering["model"], _directories["models"] / "kmeans.pkl")
 
         _status = write_csv_protected(
             pd.DataFrame([_result["summary"]]),
-            validate_output_path(_directories["results"] / "analysis_summary.csv", OVERWRITE_EXISTING_OUTPUTS),
+            _directories["results"] / "analysis_summary.csv",
             overwrite=OVERWRITE_EXISTING_OUTPUTS,
         )
         print(f"  ✓ analysis_summary.csv {_status}")
@@ -1794,9 +1840,7 @@ def _(
         }
     )
 
-    _path = validate_output_path(
-        FINGERPRINT_RESULTS_DIR / "cohens_d_by_condition_long.csv", OVERWRITE_EXISTING_OUTPUTS
-    )
+    _path = FINGERPRINT_RESULTS_DIR / "cohens_d_by_condition_long.csv"
     _status = write_csv_protected(effect_long_df, _path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
     print(f"Fingerprint effects saved for {effect_long_df['Condition'].nunique()} conditions ({_status}).")
     return (effect_long_df,)
@@ -1829,7 +1873,7 @@ def _(
         fingerprint_tables[_name] = _table
         _status = write_csv_protected(
             _table.reset_index(),
-            validate_output_path(FINGERPRINT_RESULTS_DIR / f"fingerprint_{_name}.csv", OVERWRITE_EXISTING_OUTPUTS),
+            FINGERPRINT_RESULTS_DIR / f"fingerprint_{_name}.csv",
             overwrite=OVERWRITE_EXISTING_OUTPUTS,
         )
         print(f"  ✓ fingerprint_{_name}.csv {_status}")
@@ -1953,9 +1997,7 @@ def _(
         )
 
     comparison_df = pd.DataFrame(_comparison_rows).set_index("space")
-    _path = validate_output_path(
-        COMPARISON_RESULTS_DIR / "uncorrected_vs_harmony_summary.csv", OVERWRITE_EXISTING_OUTPUTS
-    )
+    _path = COMPARISON_RESULTS_DIR / "uncorrected_vs_harmony_summary.csv"
     _status = write_csv_protected(comparison_df.reset_index(), _path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
     print(comparison_df.to_string())
     print(f"  ✓ uncorrected_vs_harmony_summary.csv {_status}")
@@ -2660,6 +2702,26 @@ def _(CONFIG, X, df, np):
         n_pairs=10_000,
         seed=42,  # same seed convention as every other notebook in this pipeline
     )
+    if len(null_dist) == 0:
+        print(
+            "ℹ Batch-aware null distribution is unavailable for a single plate; "
+            "using random cross-treatment pairs without a plate constraint."
+        )
+        _labels = df[CONFIG.treatment_col].to_numpy()
+        _eligible_i, _eligible_j = np.where(_labels[:, None] != _labels[None, :])
+        _upper = _eligible_i < _eligible_j
+        _eligible_i, _eligible_j = _eligible_i[_upper], _eligible_j[_upper]
+        _rng = np.random.default_rng(42)
+        _chosen = _rng.choice(len(_eligible_i), size=min(10_000, len(_eligible_i)), replace=False)
+        null_dist = np.asarray(
+            [np.corrcoef(X[_eligible_i[k]], X[_eligible_j[k]])[0, 1] for k in _chosen],
+            dtype=float,
+        )
+        null_dist = null_dist[np.isfinite(null_dist)]
+    if len(null_dist) == 0:
+        raise ValueError(
+            "No valid cross-treatment pairs were available for the replicate null distribution."
+        )
     print(f"Null distribution: {len(null_dist):,} random cross-treatment pairs")
     print(f"  mean={null_dist.mean():.3f}  95th percentile={np.percentile(null_dist, 95):.3f}")
 
@@ -3535,15 +3597,16 @@ def _(
         "n_fingerprint_conditions": len(condition_order),
     }
 
-    _timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    _timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S%f")
 
     def _write_with_optional_history(directory, payload):
-        _path = validate_output_path(directory / "provenance.json", OVERWRITE_EXISTING_OUTPUTS)
-        _path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _path = directory / "provenance.json"
+        if _path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+            print(f"  ↳ {directory.name}/provenance.json unchanged")
+        else:
+            _path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         if CONFIG.save_provenance_history:
             _history_path = directory / f"provenance_{_timestamp}.json"
-            if _history_path.exists():
-                raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
             _history_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     for _space_name in RUN_ANALYSIS_SPACES:

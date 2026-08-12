@@ -350,8 +350,9 @@ def _(mo):
     mo.md(r"""
     ## 2 — Locate and validate the experiment input
 
-    The notebook first looks for CellProfiler SQLite databases (`.db`,
-    `.sqlite`, or `.sqlite3`) and falls back to one legacy merged CSV.
+    The notebook accepts CellProfiler SQLite databases (`.db`, `.sqlite`,
+    `.sqlite3`), one merged single-cell CSV, the four CellProfiler `Per_*`
+    table CSVs, or an existing NB01 parquet as a resume source.
 
     `single_cell_profiles.parquet` is the **first output of this notebook**.
     It is therefore completely normal for it not to exist on the first run;
@@ -376,17 +377,17 @@ def _(DB_ROOT, OUTPUT_PARQUET, mo):
             f"Found **{len(INPUT_FILES)} CellProfiler database(s)**. "
             "They will be merged into one single-cell table."
         )
-    elif len(_candidate_csvs) == 1:
+    elif _candidate_csvs:
         INPUT_KIND = "csv"
         INPUT_FILES = _candidate_csvs
-        _source_message = "Found **one legacy merged single-cell CSV**."
-    elif len(_candidate_csvs) > 1:
-        INPUT_KIND = "ambiguous"
-        INPUT_FILES = []
         _source_message = (
-            "Found more than one CSV and cannot choose safely: "
-            + ", ".join(p.name for p in _candidate_csvs)
+            "Found **one merged CSV**." if len(INPUT_FILES) == 1 else
+            f"Found **{len(INPUT_FILES)} CSV files**; looking for CellProfiler `Per_*` tables."
         )
+    elif OUTPUT_PARQUET.exists():
+        INPUT_KIND = "parquet"
+        INPUT_FILES = [OUTPUT_PARQUET]
+        _source_message = "No raw input was found; resuming from the **existing NB01 parquet**."
     else:
         INPUT_KIND = "missing"
         INPUT_FILES = []
@@ -400,7 +401,7 @@ def _(DB_ROOT, OUTPUT_PARQUET, mo):
         if OUTPUT_PARQUET.exists()
         else "No previous parquet exists yet — this is the expected state on the first run."
     )
-    _kind = "success" if INPUT_KIND in {"sqlite", "csv"} else "danger"
+    _kind = "success" if INPUT_KIND in {"sqlite", "csv", "parquet"} else "danger"
     _discovery_callout = mo.callout(
         mo.md(
             f"**Input discovery**\n\n{_source_message}\n\n"
@@ -409,14 +410,15 @@ def _(DB_ROOT, OUTPUT_PARQUET, mo):
         kind=_kind,
     )
     mo.stop(
-        INPUT_KIND in {"missing", "ambiguous"},
+        INPUT_KIND == "missing",
         mo.vstack(
             [
                 _discovery_callout,
                 mo.callout(
                     mo.md(
-                        "Add one or more CellProfiler `.db` files, or exactly one legacy "
-                        f"CSV, to `{DB_ROOT}`, then rerun this cell."
+                        "Add CellProfiler SQLite (`.db`, `.sqlite`, `.sqlite3`), a merged "
+                        "CSV, or the four `Per_*` CSV tables to "
+                        f"`{DB_ROOT}`, then rerun this cell."
                     ),
                     kind="danger",
                 ),
@@ -613,7 +615,57 @@ def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd, sqlite3):
         print(f"    ✓ {len(merged):,} cells × {merged.shape[1]:,} columns", flush=True)
         return merged
 
-    return read_cellprofiler_sqlite, read_legacy_single_cell_csv
+    def read_cellprofiler_csvs(csv_paths) -> pd.DataFrame:
+        """Read one merged CSV or merge four CellProfiler table CSVs."""
+        csv_paths = [Path(path) for path in csv_paths]
+        if len(csv_paths) == 1:
+            return read_legacy_single_cell_csv(csv_paths[0])
+
+        _aliases = {
+            "image": {"image", "per_image"},
+            "cells": {"cells", "per_cells"},
+            "cytoplasm": {"cytoplasm", "per_cytoplasm"},
+            "nuclei": {"nuclei", "per_nuclei"},
+        }
+        _tables = {}
+        for _path in csv_paths:
+            _logical = next(
+                (name for name, stems in _aliases.items() if _path.stem.lower() in stems),
+                None,
+            )
+            if _logical:
+                print(f"  Reading {_path.name}", flush=True)
+                _tables[_logical] = pd.read_csv(_path, low_memory=False)
+        _missing = sorted(set(_aliases) - set(_tables))
+        if _missing:
+            raise ValueError(
+                "Multiple CSVs were found, but these CellProfiler tables are missing: "
+                + ", ".join(_missing)
+            )
+        _cytoplasm = _tables["cytoplasm"]
+        _nucleus_parent = next(
+            (column for column in ("Cytoplasm_Parent_Nuclei", "Cytoplasm_Parent_NucleiWithBorders")
+             if column in _cytoplasm.columns),
+            None,
+        )
+        if _nucleus_parent is None:
+            raise ValueError("Per_Cytoplasm CSV has no supported nucleus-parent column")
+        _merged = _tables["cells"].merge(
+            _cytoplasm,
+            left_on=["ImageNumber", "Cells_Number_Object_Number"],
+            right_on=["ImageNumber", "Cytoplasm_Parent_Cells"],
+            how="inner",
+            validate="one_to_one",
+        ).merge(
+            _tables["nuclei"],
+            left_on=["ImageNumber", _nucleus_parent],
+            right_on=["ImageNumber", "Nuclei_Number_Object_Number"],
+            how="inner",
+            validate="one_to_one",
+        ).merge(_tables["image"], on="ImageNumber", how="left", validate="many_to_one")
+        return ensure_core_metadata(dedupe_meta(_merged))
+
+    return read_cellprofiler_csvs, read_cellprofiler_sqlite, read_legacy_single_cell_csv
 
 
 @app.cell
@@ -643,6 +695,7 @@ def _(
     RESULTS_DIR,
     mo,
     pd,
+    read_cellprofiler_csvs,
     read_cellprofiler_sqlite,
     read_legacy_single_cell_csv,
 ):
@@ -656,8 +709,13 @@ def _(
                 print(f"[{_index}/{len(INPUT_FILES)}] {_path.name}", flush=True)
                 _loaded_parts.append(read_cellprofiler_sqlite(_path))
             df_all = pd.concat(_loaded_parts, ignore_index=True, sort=False)
+        elif INPUT_KIND == "csv":
+            df_all = read_cellprofiler_csvs(INPUT_FILES)
+        elif INPUT_KIND == "parquet":
+            print(f"Resuming from {INPUT_FILES[0]}", flush=True)
+            df_all = pd.read_parquet(INPUT_FILES[0])
         else:
-            df_all = read_legacy_single_cell_csv(INPUT_FILES[0])
+            raise ValueError(f"Unsupported input kind: {INPUT_KIND}")
     except Exception as _error:
         mo.stop(
             True,
@@ -1060,31 +1118,64 @@ def _(
     _barcode_csv = _metadata_dir / "barcode_platemap.csv"
     _platemap_dir = _metadata_dir / "platemap"
     if _barcode_csv.exists() and _platemap_dir.is_dir():
+        print("═" * 72)
+        print("PLATEMAP DISCOVERY")
+        print("═" * 72)
+        print(f"  ✓ Barcode index found: {_barcode_csv}")
+        print(f"  ✓ Platemap directory found: {_platemap_dir}")
         try:
             _barcode_index = read_barcode_platemap(_barcode_csv)
             for _plate_id in plate_dfs:
                 _row = _barcode_index.loc[_barcode_index["Metadata_Plate"] == _plate_id]
                 if _row.empty:
+                    print(
+                        f"  ⚠ {_plate_id}: no matching Assay_Plate_Barcode in "
+                        f"{_barcode_csv.name}; treatment labels will not be shown for this plate."
+                    )
                     continue
                 _pm_path = _platemap_dir / _row["filename"].iloc[0]
                 if not _pm_path.exists():
+                    _similar_files = sorted(path.name for path in _platemap_dir.glob(f"{_pm_path.stem}*"))
+                    _similar_message = (
+                        f" Similar file(s): {', '.join(_similar_files)}."
+                        if _similar_files else ""
+                    )
+                    print(
+                        f"  ⚠ {_plate_id}: referenced platemap not found: {_pm_path}."
+                        f"{_similar_message} Check duplicated extensions such as '.csv.csv'. "
+                        "The cell-count figure will be generated without treatment labels."
+                    )
                     continue
                 _pm = read_platemap_layout(_pm_path)
                 if show_treatment_labels_input.value:
                     well_treatments_by_plate[_plate_id] = dict(
                         zip(_pm["Metadata_Well"], _pm["Metadata_Treatment"].astype(str))
                     )
+                    print(
+                        f"  ✓ {_plate_id}: loaded {len(well_treatments_by_plate[_plate_id]):,} "
+                        f"well treatment label(s) from {_pm_path.name}"
+                    )
+                else:
+                    print(f"  ℹ {_plate_id}: platemap loaded, but treatment labels are disabled by the checkbox.")
                 _observed_wells = set(plate_dfs[_plate_id]["Metadata_Well"].astype(str))
                 _pm_observed = _pm.loc[_pm["Metadata_Well"].astype(str).isin(_observed_wells)]
                 for _treatment, _count in _pm_observed["Metadata_Treatment"].astype(str).value_counts().items():
                     _coverage_rows.append(
                         {"Plate": _plate_id, "Treatment": _treatment, "Observed wells": int(_count)}
                     )
-            print(f"  ✓  Loaded platemap coverage for {len(set(r['Plate'] for r in _coverage_rows))}/{len(plate_dfs)} plate(s)")
+            _covered_plates = len(set(r["Plate"] for r in _coverage_rows))
+            print(f"  {'✓' if _covered_plates == len(plate_dfs) else '⚠'} Loaded platemap coverage for {_covered_plates}/{len(plate_dfs)} plate(s)")
         except Exception as error:
-            print(f"  ⚠️  Could not load platemap coverage: {error}")
+            print(f"  ✗ Could not load platemap coverage: {type(error).__name__}: {error}")
+            print("    Cell-count figures will continue without treatment labels; correct the metadata files and rerun this cell.")
     else:
-        print("  ℹ️  Platemap not found — plate coverage cannot be assessed")
+        print("═" * 72)
+        print("PLATEMAP DISCOVERY")
+        print("═" * 72)
+        print("  ℹ Platemap metadata is incomplete; treatment labels cannot be displayed.")
+        print(f"    Barcode index: {_barcode_csv} ({'found' if _barcode_csv.exists() else 'MISSING'})")
+        print(f"    Platemap directory: {_platemap_dir} ({'found' if _platemap_dir.is_dir() else 'MISSING'})")
+        print("    Cell-count figures will still be generated using counts only.")
 
     plate_treatment_coverage = pd.DataFrame(
         _coverage_rows, columns=["Plate", "Treatment", "Observed wells"]
@@ -1388,6 +1479,8 @@ def _(
 
     plate_map_figures = []
     for _plate_id, _df_plate in plate_dfs.items():
+        _label_count = len(well_treatments_by_plate.get(_plate_id, {}))
+        print(f"  → {_plate_id}: generating plate map with {_label_count:,} treatment label(s)")
         _figure = plot_cell_count_heatmap(
             df_plate=_df_plate,
             plate_id=_plate_id,
@@ -1400,6 +1493,8 @@ def _(
         )
         if _figure is not None:
             plate_map_figures.append(_figure)
+
+    print(f"\n✓ SC-05 finished: {len(plate_map_figures)}/{len(plate_dfs)} plate map(s) generated and displayed below.")
 
     mo.vstack(plate_map_figures)
     return
@@ -1465,8 +1560,10 @@ def _(CONFIG, COUNTS_CSV, counts_df, write_summary_table_protected):
     counts_export_status = write_summary_table_protected(
         counts_df, COUNTS_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    print(f"✓ Count-summary file {counts_export_status}")
+    _status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(counts_export_status, counts_export_status)
+    print(f"✓ Count-summary file: {_status_text}")
     print(f"  File: {COUNTS_CSV}")
+    print(f"  Verified: {'yes' if COUNTS_CSV.is_file() else 'NO'} · {COUNTS_CSV.stat().st_size:,} bytes")
     return
 
 
@@ -1558,8 +1655,10 @@ def _(
     feature_integrity_status = write_summary_table_protected(
         feature_integrity_df, FEATURE_INTEGRITY_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    print(f"\n✓ Feature-integrity report {feature_integrity_status}")
+    _status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(feature_integrity_status, feature_integrity_status)
+    print(f"\n✓ Feature-integrity report: {_status_text}")
     print(f"  File: {FEATURE_INTEGRITY_CSV}")
+    print(f"  Verified: {'yes' if FEATURE_INTEGRITY_CSV.is_file() else 'NO'} · {FEATURE_INTEGRITY_CSV.stat().st_size:,} bytes")
     return (
         FEATURE_INTEGRITY_CSV,
         feature_columns,
@@ -1601,14 +1700,18 @@ def _(
     parquet_export_status = write_parquet_protected(
         df_all_with_counts, OUTPUT_PARQUET, overwrite=CONFIG.overwrite_existing_outputs
     )
-    print(f"✓ Parquet profile {parquet_export_status}")
+    _parquet_status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(parquet_export_status, parquet_export_status)
+    print(f"✓ Parquet profile: {_parquet_status_text}")
     print(f"  File: {OUTPUT_PARQUET}")
+    print(f"  Verified: {'yes' if OUTPUT_PARQUET.is_file() else 'NO'} · {OUTPUT_PARQUET.stat().st_size:,} bytes")
 
     csv_export_status = write_csv_protected(
         df_all_with_counts, OUTPUT_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    print(f"\n✓ CSV interoperability copy {csv_export_status}")
+    _csv_status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(csv_export_status, csv_export_status)
+    print(f"\n✓ CSV interoperability copy: {_csv_status_text}")
     print(f"  File: {OUTPUT_CSV}")
+    print(f"  Verified: {'yes' if OUTPUT_CSV.is_file() else 'NO'} · {OUTPUT_CSV.stat().st_size:,} bytes")
     return
 
 

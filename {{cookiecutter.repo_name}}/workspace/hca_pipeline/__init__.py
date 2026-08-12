@@ -42,7 +42,6 @@ from .metrics_qc import (
     run_dose_response,
     run_per_plate_qc,
 )
-from .modelling import balanced_sample, run_modelling_space
 from .normalize import normalize_per_plate_mad_robustize
 from .schema import (
     compare_schemas,
@@ -50,14 +49,6 @@ from .schema import (
     find_duplicate_like_columns,
     schema_fingerprint,
     validate_checkpoint,
-)
-from .single_cell import (
-    curate_single_cell_features,
-    fit_hdbscan,
-    mahal_outliers_within_well,
-    subsample_for_embedding,
-    sweep_hdbscan_params,
-    train_lgbm_classifier_with_shap,
 )
 from .stats import cohens_d
 from .taxonomy import build_taxonomy_table, classify_feature
@@ -93,20 +84,12 @@ __all__ = [
     "percent_replicating",
     "run_dose_response",
     "run_per_plate_qc",
-    "balanced_sample",
-    "run_modelling_space",
     "normalize_per_plate_mad_robustize",
     "compare_schemas",
     "describe_schema",
     "find_duplicate_like_columns",
     "schema_fingerprint",
     "validate_checkpoint",
-    "curate_single_cell_features",
-    "fit_hdbscan",
-    "mahal_outliers_within_well",
-    "subsample_for_embedding",
-    "sweep_hdbscan_params",
-    "train_lgbm_classifier_with_shap",
     "cohens_d",
     "build_taxonomy_table",
     "classify_feature",

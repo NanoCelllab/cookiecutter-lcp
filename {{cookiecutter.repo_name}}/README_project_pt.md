@@ -68,6 +68,27 @@ subpasta por experimento, nomeada `YYYY_MM_DD_Celula_Perturbacao_Tempo`. Onde
 existir uma pasta `templates/` ao lado, copie dela para a pasta do novo
 experimento e adapte.
 
+### Criar um novo experimento
+
+Antes de abrir os notebooks, crie a estrutura e copie os templates com:
+
+```bash
+pixi run new-experiment 2026_08_Huh7_NPPS_500_1000nm_5_days
+```
+
+O comando copia todos os notebooks marimo para
+`workspace/analysis/<EXPERIMENT_ID>/analysis/` e cria as pastas de backend,
+metadados, outputs, resultados, figuras e relatórios. Ele não sobrescreve uma
+pasta de análise existente. Em seguida, coloque os outputs do CellProfiler em
+`workspace/backend/<EXPERIMENT_ID>/` e abra o NB01:
+
+```bash
+pixi run marimo edit workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
+```
+
+Duplicar `workspace/analysis/templates/` manualmente também funciona, mas o
+comando é recomendado porque evita estruturas incompletas.
+
 ---
 
 ## 🧩 Ferramentas principais

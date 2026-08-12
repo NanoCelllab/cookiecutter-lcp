@@ -49,6 +49,7 @@ playwright = ">=1.62,<2"
 [tasks]
 lab = "jupyter lab"
 check = "python scripts/check_environment.py"
+new-experiment = "python scripts/new_experiment.py"
 install-browser = "playwright install chromium"
 export-report = "python3 workspace/hca_pipeline/report_export.py"
 schema-check = "python3 workspace/hca_pipeline/schema.py"

@@ -512,10 +512,22 @@ def _(FIGS_DIR, RESOLVED_CONFIG, X_sc_pca, df_sampled, np, pca_sc, plt, sns):
 
 @app.cell
 def _(RESOLVED_CONFIG, X_sc_pca, df_sampled, silhouette_score):
-    sil_plate = silhouette_score(X_sc_pca, df_sampled[RESOLVED_CONFIG.plate_col])
-    sil_treatment = silhouette_score(X_sc_pca, df_sampled[RESOLVED_CONFIG.treatment_col])
-    print(f"  Silhouette by plate (near 0 = good mixing): {sil_plate:.4f}")
-    print(f"  Silhouette by treatment (further from 0 = more separation): {sil_treatment:.4f}")
+    _plate_labels = df_sampled[RESOLVED_CONFIG.plate_col]
+    _treatment_labels = df_sampled[RESOLVED_CONFIG.treatment_col]
+    _n_plates = _plate_labels.nunique(dropna=False)
+    _n_treatments = _treatment_labels.nunique(dropna=False)
+    if 2 <= _n_plates < len(df_sampled):
+        sil_plate = silhouette_score(X_sc_pca, _plate_labels)
+        print(f"  Silhouette by plate (near 0 = good mixing): {sil_plate:.4f}")
+    else:
+        sil_plate = float("nan")
+        print("  ℹ Silhouette by plate: N/A — only one plate was detected; plate mixing cannot be measured.")
+    if 2 <= _n_treatments < len(df_sampled):
+        sil_treatment = silhouette_score(X_sc_pca, _treatment_labels)
+        print(f"  Silhouette by treatment (further from 0 = more separation): {sil_treatment:.4f}")
+    else:
+        sil_treatment = float("nan")
+        print("  ℹ Silhouette by treatment: N/A — at least two treatment groups are required.")
     return
 
 

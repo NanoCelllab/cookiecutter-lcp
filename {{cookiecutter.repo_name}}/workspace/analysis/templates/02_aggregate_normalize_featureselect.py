@@ -368,7 +368,7 @@ def _(mo):
 
 
 @app.cell
-def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_core_metadata, pd):
+def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_core_metadata, mo, pd):
     if INPUT_PARQUET.exists():
         df_loaded = pd.read_parquet(INPUT_PARQUET)
         print(f"  Loaded Parquet input: {INPUT_PARQUET}")
@@ -376,10 +376,22 @@ def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_cor
         df_loaded = pd.read_csv(INPUT_CSV, low_memory=False)
         print(f"  Loaded CSV fallback: {INPUT_CSV}")
     else:
-        raise FileNotFoundError(f"Input file not found. Expected one of:\n  {INPUT_PARQUET}\n  {INPUT_CSV}")
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**NB02 stopped: NB01 output was not found.**\n\n"
+                    f"Checked:\n- `{INPUT_PARQUET}`\n- `{INPUT_CSV}`\n\n"
+                    "Run NB01 through its final integrity check, confirm that it reports "
+                    "`NB01 COMPLETED`, then rerun this cell. Downstream cells were stopped "
+                    "to avoid cascading errors."
+                ),
+                kind="warn",
+            ),
+        )
 
     df_loaded = add_cell_count_metadata(dedupe_meta(ensure_core_metadata(df_loaded)))
-    print(f"  Shape: {df_loaded.shape}")
+    print(f"  ✓ Input ready: {df_loaded.shape[0]:,} cells × {df_loaded.shape[1]:,} columns")
     return (df_loaded,)
 
 
@@ -860,9 +872,9 @@ def _(
     _plot_pca_by_plate(X_norm, plates_norm, "After normalization", axes_sc08[1])
     fig_sc08.suptitle("SC-08: Plate-effect assessment", fontsize=13, fontweight="bold")
     fig_sc08.tight_layout()
-    fig_sc08.savefig(FIGS_DIR / "sc08_plate_effect_pca.png", dpi=150, bbox_inches="tight")
-    plt.close(fig_sc08)
-    print(f"✓ Figure saved: {FIGS_DIR / 'sc08_plate_effect_pca.png'}")
+    _sc08_path = FIGS_DIR / "sc08_plate_effect_pca.png"
+    fig_sc08.savefig(_sc08_path, dpi=150, bbox_inches="tight")
+    print(f"✓ Figure saved and displayed: {_sc08_path} ({_sc08_path.stat().st_size:,} bytes)")
 
     unique_plates = np.unique(plates_norm)
     if len(unique_plates) > 1 and X_norm.shape[0] > len(unique_plates):
@@ -926,11 +938,11 @@ def _(
     cv_summary = pd.DataFrame(cv_rows).sort_values("median_CV", ascending=False, na_position="last")
 
     cv_summary.to_csv(CV_SUMMARY_CSV, index=False)
-    print(f"✓ cv_summary.csv saved → {CV_SUMMARY_CSV}")
+    print(f"✓ cv_summary.csv saved → {CV_SUMMARY_CSV} ({CV_SUMMARY_CSV.stat().st_size:,} bytes)")
 
     variability_combined = corr_df.merge(cv_summary, on=replicate_group_cols, how="outer")
     variability_combined.to_csv(WITHIN_GROUP_VARIABILITY_CSV, index=False)
-    print(f"✓ within_group_variability.csv saved → {WITHIN_GROUP_VARIABILITY_CSV}")
+    print(f"✓ within_group_variability.csv saved → {WITHIN_GROUP_VARIABILITY_CSV} ({WITHIN_GROUP_VARIABILITY_CSV.stat().st_size:,} bytes)")
 
     corr_warn_threshold = float(corr_warn_threshold_input.value)
     cv_warn_threshold = float(cv_warn_threshold_input.value)
@@ -962,9 +974,9 @@ def _(
     axes_sc09[1].legend(fontsize=8)
 
     fig_sc09.tight_layout()
-    fig_sc09.savefig(FIGS_DIR / "sc09_within_group_variability.png", dpi=150, bbox_inches="tight")
-    plt.close(fig_sc09)
-    print(f"✓ Figure saved: {FIGS_DIR / 'sc09_within_group_variability.png'}")
+    _sc09_path = FIGS_DIR / "sc09_within_group_variability.png"
+    fig_sc09.savefig(_sc09_path, dpi=150, bbox_inches="tight")
+    print(f"✓ Figure saved and displayed: {_sc09_path} ({_sc09_path.stat().st_size:,} bytes)")
     fig_sc09
     return
 
@@ -1053,7 +1065,10 @@ def _(
             PW_FEATURES_SELECTED_PARQUET,
             overwrite=OVERWRITE_EXISTING_OUTPUTS or not _feature_scope_matches,
         )
-        print(f"✓ Feature-selected profile {export_status}: {PW_FEATURES_SELECTED_PARQUET}")
+        _status_label = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(export_status, export_status)
+        print(f"✓ Feature-selected profile: {_status_label}")
+        print(f"  File: {PW_FEATURES_SELECTED_PARQUET}")
+        print(f"  Verified: {PW_FEATURES_SELECTED_PARQUET.stat().st_size:,} bytes")
     return (df_feature_selected,)
 
 
@@ -1162,6 +1177,49 @@ def _(
         print(f"✓ Historical record: {_history_path}")
     else:
         print("  Historical record: disabled")
+    return (provenance_nb02_path,)
+
+
+@app.cell
+def _(
+    CV_SUMMARY_CSV,
+    FIGS_DIR,
+    PW_FEATURES_SELECTED_PARQUET,
+    WITHIN_GROUP_VARIABILITY_CSV,
+    df_feature_selected,
+    feat_cols_final,
+    mo,
+    provenance_nb02_path,
+):
+    _required_outputs = [
+        PW_FEATURES_SELECTED_PARQUET,
+        CV_SUMMARY_CSV,
+        WITHIN_GROUP_VARIABILITY_CSV,
+        FIGS_DIR / "sc08_plate_effect_pca.png",
+        FIGS_DIR / "sc09_within_group_variability.png",
+        provenance_nb02_path,
+    ]
+    _missing_outputs = [path for path in _required_outputs if not path.is_file()]
+    mo.stop(
+        bool(_missing_outputs),
+        mo.callout(
+            mo.md(
+                "**NB02 did not complete successfully.**\n\n"
+                "Required output(s) are missing:\n"
+                + "\n".join(f"- `{path}`" for path in _missing_outputs)
+                + "\n\nReview the first error or warning above. Do not continue to NB03 yet."
+            ),
+            kind="danger",
+        ),
+    )
+    print("═" * 72)
+    print("NB02 COMPLETED — ALL REQUIRED OUTPUTS VERIFIED")
+    print("═" * 72)
+    print(f"  Final wells:    {len(df_feature_selected):,}")
+    print(f"  Final features: {len(feat_cols_final):,}")
+    for _path in _required_outputs:
+        print(f"  ✓ {_path} ({_path.stat().st_size:,} bytes)")
+    print("\n✓ Safe to continue to NB03 — Quality Metrics")
     return
 
 
