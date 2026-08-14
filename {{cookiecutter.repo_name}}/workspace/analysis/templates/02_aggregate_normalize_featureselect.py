@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -33,21 +38,9 @@ def _(mo):
        and within-group CV/correlation diagnostic.
     7. Saves `cv_summary.csv` for NB04's optional LDA bias check.
 
-    Each stage below checks for its own checkpoint parquet on disk and
-    skips recomputation when one is already present — this replaces the
-    original notebook's single "resume from the most advanced stage"
-    ladder with N independent, always-correct read-cache-or-compute
-    cells (a cleaner fit for marimo's reactive model, at the minor cost
-    of re-validating — not recomputing — already-cached earlier stages
-    on a full rerun).
-
-    > The original notebook also had a ~48-cell block of one-off
-    > scratch investigation and a self-contained image-QC mini-pipeline
-    > entangled with this one. Neither is part of the documented 7-step
-    > flow above; the image-QC toolkit now lives in
-    > `hca_pipeline.image_qc` for use in a separate, optional notebook,
-    > and the scratch cells were not ported (they were ad hoc debugging
-    > of specific wells/plates, not reusable pipeline logic).
+    Valid checkpoints may be reused to avoid repeating expensive stages.
+    Every reuse, recomputation, exclusion, warning, and written output is
+    reported explicitly below.
     """)
     return
 
@@ -77,7 +70,7 @@ def _():
 
 
 @app.cell
-def _(Path):
+def _(Path, mo, print):
     import sys
 
     _notebook_path = Path(__file__).resolve()
@@ -99,7 +92,11 @@ def _(Path):
     sys.path.insert(0, str(_pipelines_dir))
 
     from hca_pipeline.config import SUPPORTED_PLATE_FORMATS, ExperimentConfig, validate_configuration
-    from hca_pipeline.feature_select import infer_feature_cols, select_features
+    from hca_pipeline.feature_select import (
+        infer_feature_cols,
+        select_features,
+        technical_identifier_columns,
+    )
     from hca_pipeline.io import (
         checkpoint_matches_plate_scope,
         resolve_resume_stage,
@@ -127,7 +124,10 @@ def _(Path):
         normalize_per_plate_mad_robustize,
     )
 
-    print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
+    mo.callout(
+        mo.md(f"### Shared utilities ready\n\n✅ Loaded `hca_pipeline` from `{_pipelines_dir}`."),
+        kind="success",
+    )
     return (
         CELL_COUNT_METADATA_COLUMN,
         ExperimentConfig,
@@ -147,9 +147,12 @@ def _(Path):
         normalize_per_plate_mad_robustize,
         read_barcode_platemap,
         select_features,
+        technical_identifier_columns,
         validate_checkpoint_df,
         validate_configuration,
+        write_csv_protected,
         write_parquet_protected,
+        write_summary_table_protected,
     )
 
 
@@ -158,9 +161,9 @@ def _(mo):
     mo.md(r"""
     ## 1 — Experiment configuration
 
-    Loads the experiment chosen (and configured) in NB01. Only
-    NB02-specific parameters are asked here — plate format, channels,
-    and control vocabulary already came from `experiment_config.json`.
+    Select the experiment to process. Its saved configuration from NB01 is
+    loaded automatically. Most NB02 parameters have safe defaults and are
+    available under **Advanced settings** only when they need review.
     """)
     return
 
@@ -229,27 +232,40 @@ def _(loaded_config, mo):
         value="",
         label='Wells to exclude, one "Plate:Well" per line (optional)',
     )
-    overwrite_input = mo.ui.checkbox(value=False, label="Overwrite existing outputs")
+    overwrite_input = mo.ui.checkbox(
+        value=loaded_config.overwrite_existing_outputs,
+        label="Overwrite existing outputs",
+    )
     save_history_input = mo.ui.checkbox(
         value=loaded_config.save_provenance_history,
         label="Save timestamped provenance history",
     )
 
-    mo.vstack(
-        [
-            negcon_values_input,
-            norm_control_input,
-            use_checkpoints_input,
-            max_missing_fraction_input,
-            mad_epsilon_input,
-            max_normalized_magnitude_input,
-            cv_warn_threshold_input,
-            corr_warn_threshold_input,
-            exclude_wells_input,
-            overwrite_input,
-            save_history_input,
-        ]
+    advanced_settings = mo.accordion(
+        {
+            "Advanced settings": mo.vstack(
+                [
+                    mo.md(
+                        "Change these values only when the experimental design or QC review "
+                        "requires it. The validated values are summarized below before processing."
+                    ),
+                    negcon_values_input,
+                    norm_control_input,
+                    use_checkpoints_input,
+                    max_missing_fraction_input,
+                    mad_epsilon_input,
+                    max_normalized_magnitude_input,
+                    cv_warn_threshold_input,
+                    corr_warn_threshold_input,
+                    exclude_wells_input,
+                    overwrite_input,
+                    save_history_input,
+                ],
+                gap=1,
+            )
+        }
     )
+    advanced_settings
     return (
         corr_warn_threshold_input,
         cv_warn_threshold_input,
@@ -273,8 +289,11 @@ def _(
     negcon_values_input,
     norm_control_input,
     overwrite_input,
+    mo,
+    print,
     replace,
     save_history_input,
+    use_checkpoints_input,
     validate_configuration,
 ):
     EXPERIMENT_ID = experiment_id_input.value
@@ -288,19 +307,45 @@ def _(
 
     NEGCON_VALUES = [v.strip() for v in negcon_values_input.value.split(",") if v.strip()]
     NORM_CONTROL = norm_control_input.value
+    if not NEGCON_VALUES:
+        raise ValueError(
+            "At least one negative-control value is required. Open Advanced settings "
+            "and enter the control vocabulary used in the platemap."
+        )
+    if NORM_CONTROL not in NEGCON_VALUES:
+        raise ValueError(
+            f"Normalization reference {NORM_CONTROL!r} is not present in the configured "
+            f"negative-control values: {NEGCON_VALUES}."
+        )
 
     CONFIG = replace(
         loaded_config,
         experiment_id=EXPERIMENT_ID,
         negcon_values=NEGCON_VALUES,
+        overwrite_existing_outputs=bool(overwrite_input.value),
         save_provenance_history=bool(save_history_input.value),
     )
     CONFIG.save(REPO_ROOT)
 
     OVERWRITE_EXISTING_OUTPUTS = bool(overwrite_input.value)
-    print(f"  Experiment ID:      {EXPERIMENT_ID}")
-    print(f"  Negcon values:      {NEGCON_VALUES}")
-    print(f"  Normalize against:  {NORM_CONTROL}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### Configuration validated
+
+            | Setting | Effective value |
+            |---|---|
+            | Experiment | `{EXPERIMENT_ID}` |
+            | Analysis mode | **{CONFIG.analysis_mode}** |
+            | Negative-control values | {', '.join(f'`{v}`' for v in NEGCON_VALUES)} |
+            | Normalization reference | `{NORM_CONTROL}` |
+            | Reuse checkpoints | **{bool(use_checkpoints_input.value)}** |
+            | Overwrite existing outputs | **{OVERWRITE_EXISTING_OUTPUTS}** |
+            | Save timestamped provenance | **{CONFIG.save_provenance_history}** |
+            """
+        ),
+        kind="success",
+    )
     return (
         CONFIG,
         EXPERIMENT_ID,
@@ -311,7 +356,7 @@ def _(
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, mo, print):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     METADATA_DIR = WORKSPACE_DIR / "metadata" / EXPERIMENT_ID
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
@@ -329,10 +374,12 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     INPUT_PARQUET = ANALYSIS_OUT_DIR / "single_cell_profiles.parquet"
 
     SC_ANNOTATED_PARQUET = CACHE_DIR / "single_cell_annotated.parquet"
-    SC_READY_PARQUET = CACHE_DIR / "single_cell_ready.parquet"
+    SC_READY_PARQUET = PROFILES_OUT_DIR / "single_cell_ready.parquet"
+    LEGACY_SC_READY_PARQUET = CACHE_DIR / "single_cell_ready.parquet"
     PW_AGGREGATED_PARQUET = CACHE_DIR / "per_well_aggregated.parquet"
     PW_NORMALIZED_PARQUET = CACHE_DIR / "per_well_normalized.parquet"
     PW_FEATURES_SELECTED_PARQUET = PROFILES_OUT_DIR / "per_well_features_selected.parquet"
+    PW_FEATURES_SELECTED_CSV = PROFILES_OUT_DIR / "per_well_features_selected.csv"
 
     CV_SUMMARY_CSV = RESULTS_DIR / "cv_summary.csv"
     WITHIN_GROUP_VARIABILITY_CSV = RESULTS_DIR / "within_group_variability.csv"
@@ -340,16 +387,31 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     for _d in (ANALYSIS_OUT_DIR, PROFILES_OUT_DIR, FIGS_DIR, CACHE_DIR, RESULTS_DIR):
         _d.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Input:  {INPUT_PARQUET}")
-    print(f"  Output: {PW_FEATURES_SELECTED_PARQUET}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### Paths ready
+
+            - Preferred NB01 input: `{INPUT_PARQUET}`
+            - CSV fallback: `{INPUT_CSV}`
+            - Final Parquet: `{PW_FEATURES_SELECTED_PARQUET}`
+            - Declared single-cell output: `{SC_READY_PARQUET}`
+            - Interoperability CSV: `{PW_FEATURES_SELECTED_CSV}`
+            - Figures: `{FIGS_DIR}`
+            """
+        ),
+        kind="info",
+    )
     return (
         BARCODE_PLATEMAP_CSV,
         CV_SUMMARY_CSV,
         FIGS_DIR,
         INPUT_CSV,
         INPUT_PARQUET,
+        LEGACY_SC_READY_PARQUET,
         PLATEMAP_DIR,
         PW_AGGREGATED_PARQUET,
+        PW_FEATURES_SELECTED_CSV,
         PW_FEATURES_SELECTED_PARQUET,
         PW_NORMALIZED_PARQUET,
         RESULTS_DIR,
@@ -363,40 +425,39 @@ def _(EXPERIMENT_ID, REPO_ROOT):
 def _(mo):
     mo.md(r"""
     ## 2 — Load single-cell profiles
+
+    NB02 first looks for the Parquet produced by NB01, then uses the CSV copy
+    only as a compatibility fallback. Not finding either file is an expected
+    first-run condition: the notebook stops here with instructions instead of
+    allowing later cells to fail.
     """)
     return
 
 
 @app.cell
-def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_core_metadata, mo, pd):
+def _(INPUT_CSV, INPUT_PARQUET, add_cell_count_metadata, dedupe_meta, ensure_core_metadata, mo, pd, print):
+    print("INPUT DISCOVERY")
+    print(f"  Parquet: {'found' if INPUT_PARQUET.exists() else 'not found'} — {INPUT_PARQUET}")
+    print(f"  CSV:     {'found' if INPUT_CSV.exists() else 'not found'} — {INPUT_CSV}")
     if INPUT_PARQUET.exists():
         df_loaded = pd.read_parquet(INPUT_PARQUET)
-        print(f"  Loaded Parquet input: {INPUT_PARQUET}")
+        _input_kind = "Parquet"
+        _input_path = INPUT_PARQUET
     elif INPUT_CSV.exists():
         df_loaded = pd.read_csv(INPUT_CSV, low_memory=False)
-        print(f"  Loaded CSV fallback: {INPUT_CSV}")
+        _input_kind = "CSV fallback"
+        _input_path = INPUT_CSV
     else:
-        mo.stop(
-            True,
-            mo.callout(
-                mo.md(
-                    "**NB02 stopped: NB01 output was not found.**\n\n"
-                    f"Checked:\n- `{INPUT_PARQUET}`\n- `{INPUT_CSV}`\n\n"
-                    "Run NB01 through its final integrity check, confirm that it reports "
-                    "`NB01 COMPLETED`, then rerun this cell. Downstream cells were stopped "
-                    "to avoid cascading errors."
-                ),
-                kind="warn",
-            ),
-        )
+        mo.stop(True, mo.callout(mo.md("**NB02 stopped: NB01 output was not found.**\n\n" f"Checked:\n- `{INPUT_PARQUET}`\n- `{INPUT_CSV}`\n\nRun NB01 through `NB01 COMPLETED` and rerun this cell. Downstream cells were stopped to avoid cascading errors."), kind="warn"))
 
     df_loaded = add_cell_count_metadata(dedupe_meta(ensure_core_metadata(df_loaded)))
-    print(f"  ✓ Input ready: {df_loaded.shape[0]:,} cells × {df_loaded.shape[1]:,} columns")
+    print(f"✓ Loaded {_input_kind}: {_input_path}")
+    print(f"  Cells: {len(df_loaded):,} · columns: {df_loaded.shape[1]:,}")
     return (df_loaded,)
 
 
 @app.cell
-def _(CONFIG, df_loaded, pd):
+def _(CONFIG, df_loaded, pd, print):
     available_plates = sorted(df_loaded[CONFIG.plate_col].dropna().astype(str).unique())
     analysis_plates = CONFIG.resolve_plate_scope(available_plates)
     df_analysis_scope = df_loaded.loc[
@@ -436,8 +497,19 @@ def _(mo):
     mo.md(r"""
     ## 3 — Annotate with platemap (SC-06)
 
-    Merges the single-cell/well profiles with each plate's platemap
-    layout, then confirms every cell received a treatment annotation.
+    ### SC-06 — Treatment-annotation coverage
+
+    **What it evaluates:** whether every loaded cell can be linked through its
+    plate and well to the treatment metadata in the platemap.
+
+    **How to read it:** PASS means every cell has a treatment label. WARN means
+    some cells remain unannotated; the reported count and fraction show the
+    extent of the problem. This is advisory here because the rows are preserved,
+    but treatment-based analyses may omit or misgroup them. Review barcode and
+    platemap mappings before interpreting treatment effects.
+
+    This check confirms annotation coverage only; it does not confirm that the
+    experimental labels themselves are biologically correct.
     """)
     return
 
@@ -446,6 +518,7 @@ def _(mo):
 def _(
     BARCODE_PLATEMAP_CSV,
     CELL_COUNT_METADATA_COLUMN,
+    LEGACY_SC_READY_PARQUET,
     PLATEMAP_DIR,
     SC_ANNOTATED_PARQUET,
     add_cell_count_metadata,
@@ -456,6 +529,7 @@ def _(
     df_analysis_scope,
     infer_feature_cols,
     read_barcode_platemap,
+    print,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
@@ -492,7 +566,7 @@ def _(
 
 
 @app.cell
-def _(CONFIG, df_annotated):
+def _(CONFIG, df_annotated, print):
     RESOLVED_CONFIG = CONFIG.resolve_columns(df_annotated)
     print("── SC-06: Annotation coverage ──")
     if RESOLVED_CONFIG.treatment_col not in df_annotated.columns:
@@ -504,14 +578,16 @@ def _(CONFIG, df_annotated):
             f"  ⚠️  {n_missing_treatment} cells ({n_missing_treatment / len(df_annotated):.1%}) "
             "have no treatment annotation."
         )
-        print("  SC-06: WARN")
+        sc06_status = "WARN"
+        print("  SC-06: WARN — review barcode/platemap mappings before treatment-level interpretation")
     else:
+        sc06_status = "PASS"
         print("  ✓  All cells have treatment annotation")
         print("  SC-06: PASS")
 
     print(f"  Dose axis:  {'present (' + RESOLVED_CONFIG.concentration_col + ')' if RESOLVED_CONFIG.has_dose_axis else 'absent'}")
     print(f"  Time axis:  {'present (' + RESOLVED_CONFIG.time_col + ')' if RESOLVED_CONFIG.has_time_axis else 'absent'}")
-    return (RESOLVED_CONFIG,)
+    return RESOLVED_CONFIG, n_missing_treatment, sc06_status
 
 
 @app.cell
@@ -520,7 +596,8 @@ def _(mo):
     ## 4 — Remove wells not in the platemap layout
 
     Wells present in the data but missing from the platemap layout (or
-    explicitly excluded) are dropped before aggregation.
+    explicitly excluded) are dropped before aggregation. The notebook reports
+    both affected wells and the exact number of single-cell rows removed.
     """)
     return
 
@@ -540,19 +617,28 @@ def _(
     infer_feature_cols,
     norm_well,
     pd,
+    print,
     read_barcode_platemap,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
+    _ready_source = (
+        SC_READY_PARQUET
+        if SC_READY_PARQUET.exists()
+        else LEGACY_SC_READY_PARQUET
+    )
     _reuse_ready = use_checkpoints_input.value and checkpoint_matches_plate_scope(
-        SC_READY_PARQUET, analysis_plates
+        _ready_source, analysis_plates
     )
     if _reuse_ready:
         import pandas as _pd
 
-        df_ready = _pd.read_parquet(SC_READY_PARQUET)
+        df_ready = _pd.read_parquet(_ready_source)
         validate_checkpoint_df(df_ready, "ready", infer_feature_cols(df_ready))
-        print(f"✓ Reused checkpoint: {SC_READY_PARQUET}")
+        print(f"✓ Reused single-cell output: {_ready_source}")
+        if _ready_source == LEGACY_SC_READY_PARQUET:
+            df_ready.to_parquet(SC_READY_PARQUET, index=False)
+            print(f"  ✓ Promoted legacy cache file to declared NB02 output: {SC_READY_PARQUET}")
     else:
         if use_checkpoints_input.value and SC_READY_PARQUET.exists():
             print("  ℹ️  Invalidated ready checkpoint because its plate scope changed")
@@ -568,12 +654,20 @@ def _(
             print("✓  All wells present in platemap layout")
 
         exclude_wells: dict[str, list[str]] = {}
+        _invalid_exclusion_lines = []
         for _line in exclude_wells_input.value.splitlines():
             _line = _line.strip()
-            if not _line or ":" not in _line:
+            if not _line:
+                continue
+            if ":" not in _line:
+                _invalid_exclusion_lines.append(_line)
                 continue
             _plate, _well = _line.split(":", 1)
             exclude_wells.setdefault(_plate.strip(), []).append(_well.strip())
+        if _invalid_exclusion_lines:
+            print("⚠ Ignored malformed manual exclusions; expected one Plate:Well pair per line:")
+            for _line in _invalid_exclusion_lines:
+                print(f"    - {_line}")
 
         df_ready = df_annotated.copy()
         df_ready["__well_norm__"] = df_ready["Metadata_Well"].map(norm_well)
@@ -588,20 +682,32 @@ def _(
         df_ready = df_ready.loc[~remove_mask].drop(columns="__well_norm__", errors="ignore")
         df_ready.to_parquet(SC_READY_PARQUET, index=False)
         print(f"  Removed {n_removed} rows → {df_ready.shape[0]:,} cells remaining")
-        print(f"✓ Cached: {SC_READY_PARQUET}")
+        print(f"✓ Declared single-cell output written: {SC_READY_PARQUET}")
 
     _migrate_count_metadata = CELL_COUNT_METADATA_COLUMN not in df_ready.columns
     df_ready = add_cell_count_metadata(df_ready)
     if _migrate_count_metadata:
         df_ready.to_parquet(SC_READY_PARQUET, index=False)
         print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to ready checkpoint")
+    _ready_wells = df_ready.groupby(["Metadata_Plate", "Metadata_Well"]).ngroups
+    print(f"✓ Ready for aggregation: {len(df_ready):,} cells across {_ready_wells:,} wells")
     return (df_ready,)
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 5 — Aggregate per well (median) — SC-07
+    ## 5 — Aggregate per well (median)
+
+    ### SC-07 — One profile per observed well
+
+    **What it evaluates:** whether median aggregation produces exactly one row
+    for every plate/well pair retained after annotation and exclusions.
+
+    **How to read it:** PASS means no wells were silently lost or duplicated.
+    A mismatch is blocking because downstream normalization assumes one profile
+    per well. If it fails, inspect missing or inconsistent grouping metadata;
+    it does not by itself indicate a biological QC failure.
     """)
     return
 
@@ -615,6 +721,7 @@ def _(
     checkpoint_matches_plate_scope,
     df_ready,
     infer_feature_cols,
+    print,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
@@ -664,20 +771,23 @@ def _(
             .median(numeric_only=True)
         )
 
-        expected_wells = df_ready.groupby([RESOLVED_CONFIG.plate_col, RESOLVED_CONFIG.well_col]).ngroups
-        print("── SC-07: Aggregation shape ──")
-        print(f"  Wells × features: {df_aggregated.shape[0]} × {len(agg_feature_cols)}")
-        print(f"  Expected wells  : {expected_wells}")
-        if df_aggregated.shape[0] != expected_wells:
-            raise ValueError(
-                f"Wells were lost during aggregation: got {df_aggregated.shape[0]}, expected "
-                f"{expected_wells}. Check for missing/inconsistent metadata."
-            )
-        print("  ✓  Well count matches — SC-07: PASS")
-
         df_aggregated.to_parquet(PW_AGGREGATED_PARQUET, index=False)
         print(f"✓ Cached: {PW_AGGREGATED_PARQUET}")
-    return (df_aggregated,)
+
+    expected_wells = df_ready.groupby(
+        [RESOLVED_CONFIG.plate_col, RESOLVED_CONFIG.well_col]
+    ).ngroups
+    print("── SC-07: One profile per observed well ──")
+    print(f"  Aggregated rows: {df_aggregated.shape[0]:,}")
+    print(f"  Expected wells: {expected_wells:,}")
+    if df_aggregated.shape[0] != expected_wells:
+        raise ValueError(
+            f"SC-07 failed: aggregation produced {df_aggregated.shape[0]} rows for "
+            f"{expected_wells} observed wells. Check missing/inconsistent grouping metadata."
+        )
+    sc07_status = "PASS"
+    print("  ✓ SC-07 PASS — no wells were lost or duplicated during aggregation")
+    return df_aggregated, expected_wells, sc07_status
 
 
 @app.cell
@@ -698,6 +808,12 @@ def _(mo):
     - **SC-09b** (after): a safety net, independent of cause — drops any
       *normalized* feature whose magnitude is still implausibly large, in
       case something other than a near-zero MAD produces the same symptom.
+
+    Both guards are **corrective warnings**: WARN means problematic features
+    were found and removed so the notebook could continue safely. PASS means no
+    feature crossed the configured threshold. When a validated checkpoint is
+    reused, the summary reports REUSED because the earlier removal evidence is
+    not recomputed. Neither check measures biological treatment activity.
     """)
     return
 
@@ -720,6 +836,7 @@ def _(
     max_missing_fraction_input,
     max_normalized_magnitude_input,
     normalize_per_plate_mad_robustize,
+    print,
     use_checkpoints_input,
     validate_checkpoint_df,
 ):
@@ -740,6 +857,10 @@ def _(
             print(f"  ✓ Added {CELL_COUNT_METADATA_COLUMN} to normalized checkpoint")
         validate_checkpoint_df(df_normalized, "normalized", infer_feature_cols(df_normalized), strict=True)
         print(f"✓ Reused checkpoint: {PW_NORMALIZED_PARQUET}")
+        sc07b_status = "REUSED"
+        sc09b_status = "REUSED"
+        n_near_zero_mad_features = None
+        n_extreme_magnitude_features = None
     else:
         if use_checkpoints_input.value and PW_NORMALIZED_PARQUET.exists():
             print("  ℹ️  Invalidated normalized checkpoint because its plate scope changed")
@@ -764,12 +885,15 @@ def _(
         )
         _near_zero_mad_features = sorted({r["feature"] for r in near_zero_mad_report})
         if _near_zero_mad_features:
+            sc07b_status = "WARN"
             print(f"  ⚠️  Dropped {len(_near_zero_mad_features)} feature(s) with near-zero control MAD:")
             for _feature in _near_zero_mad_features:
                 _plates = [r["plate"] for r in near_zero_mad_report if r["feature"] == _feature]
                 print(f"      - {_feature} (MAD ≈ 0 on: {', '.join(str(p) for p in _plates)})")
         else:
+            sc07b_status = "PASS"
             print("  ✓  No near-zero-MAD features detected.")
+        n_near_zero_mad_features = len(_near_zero_mad_features)
 
         df_normalized = normalize_per_plate_mad_robustize(
             df_cleaned,
@@ -787,21 +911,51 @@ def _(
             df_normalized, _post_norm_feature_cols, max_abs_value=float(max_normalized_magnitude_input.value),
         )
         if extreme_magnitude_report:
+            sc09b_status = "WARN"
             print(f"  ⚠️  Dropped {len(extreme_magnitude_report)} feature(s) with implausible normalized magnitude:")
             for _feature, _max_abs in extreme_magnitude_report.items():
                 print(f"      - {_feature} (max|value| = {_max_abs:.3e})")
         else:
+            sc09b_status = "PASS"
             print("  ✓  No implausible post-normalization magnitudes detected.")
+        n_extreme_magnitude_features = len(extreme_magnitude_report)
 
         df_normalized.to_parquet(PW_NORMALIZED_PARQUET, index=False)
         print(f"✓ Normalized and cached: {PW_NORMALIZED_PARQUET}  →  {df_normalized.shape}")
-    return (df_normalized,)
+    print(
+        f"✓ Normalized profile ready: {len(df_normalized):,} wells · "
+        f"{len(infer_feature_cols(df_normalized)):,} features"
+    )
+    return (
+        df_normalized,
+        n_extreme_magnitude_features,
+        n_near_zero_mad_features,
+        sc07b_status,
+        sc09b_status,
+    )
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 7 — SC-08: plate-effect PCA · SC-09: within-group variability
+    ## 7 — Technical structure and replicate consistency
+
+    ### SC-08 — Residual plate structure after normalization
+
+    The paired PCA plots compare profiles before and after normalization. Plate
+    silhouette is reported only when at least two plates are available: values
+    near zero indicate better mixing, while positive separation suggests
+    residual plate-associated structure. This is an **advisory diagnostic**, not
+    an automatic batch-correction decision and not evidence of treatment effect.
+
+    ### SC-09 — Within-condition replicate consistency
+
+    This check groups wells by treatment (and dose when available), then reports
+    median pairwise profile correlation and a complementary coefficient of
+    variation. PASS means every evaluable group meets the configured correlation
+    threshold; WARN identifies groups to inspect. SKIP means no group has at
+    least two replicates. Correlation measures consistency, not phenotypic
+    activity or mechanism-of-action distinctiveness.
     """)
     return
 
@@ -830,6 +984,7 @@ def _(
 @app.cell
 def _(
     FIGS_DIR,
+    OVERWRITE_EXISTING_OUTPUTS,
     PCA,
     RESOLVED_CONFIG,
     StandardScaler,
@@ -838,9 +993,15 @@ def _(
     infer_feature_cols,
     np,
     plt,
+    print,
     silhouette_score,
 ):
     def _pca_coordinates(feature_matrix):
+        if min(feature_matrix.shape) < 2:
+            raise ValueError(
+                "SC-08 requires at least two well profiles and two usable features for PCA; "
+                f"received matrix shape {feature_matrix.shape}."
+            )
         pca = PCA(n_components=2, random_state=42)
         scaled = StandardScaler().fit_transform(feature_matrix)
         return pca.fit_transform(scaled), pca.explained_variance_ratio_
@@ -873,23 +1034,31 @@ def _(
     fig_sc08.suptitle("SC-08: Plate-effect assessment", fontsize=13, fontweight="bold")
     fig_sc08.tight_layout()
     _sc08_path = FIGS_DIR / "sc08_plate_effect_pca.png"
-    fig_sc08.savefig(_sc08_path, dpi=150, bbox_inches="tight")
-    print(f"✓ Figure saved and displayed: {_sc08_path} ({_sc08_path.stat().st_size:,} bytes)")
+    if _sc08_path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+        print(f"ℹ Existing SC-08 figure protected; current figure is displayed but not written: {_sc08_path}")
+    else:
+        _figure_action = "replaced" if _sc08_path.exists() else "created"
+        fig_sc08.savefig(_sc08_path, dpi=150, bbox_inches="tight")
+        print(f"✓ SC-08 figure {_figure_action} and displayed: {_sc08_path} ({_sc08_path.stat().st_size:,} bytes)")
 
     unique_plates = np.unique(plates_norm)
     if len(unique_plates) > 1 and X_norm.shape[0] > len(unique_plates):
         plate_silhouette = silhouette_score(X_norm, plates_norm)
-        print(f"  Silhouette by plate after normalization: {plate_silhouette:.3f} (near 0 = better mixing)")
+        sc08_status = "INFO"
+        print(f"  SC-08 INFO — silhouette by plate: {plate_silhouette:.3f} (near 0 = better mixing)")
     else:
-        print("  Silhouette skipped: single plate or too few samples.")
+        plate_silhouette = None
+        sc08_status = "SKIP"
+        print("  SC-08 SKIP — silhouette requires at least two plates and enough well profiles")
     fig_sc08
-    return (feat_cols_norm,)
+    return feat_cols_norm, plate_silhouette, sc08_status
 
 
 @app.cell
 def _(
     CV_SUMMARY_CSV,
     FIGS_DIR,
+    OVERWRITE_EXISTING_OUTPUTS,
     RESOLVED_CONFIG,
     WITHIN_GROUP_VARIABILITY_CSV,
     analysis_plates,
@@ -897,9 +1066,12 @@ def _(
     cv_warn_threshold_input,
     df_normalized,
     feat_cols_norm,
+    mo,
     np,
     pd,
     plt,
+    print,
+    write_summary_table_protected,
 ):
     replicate_group_cols = [RESOLVED_CONFIG.treatment_col]
     if RESOLVED_CONFIG.has_dose_axis:
@@ -937,19 +1109,45 @@ def _(
     corr_df = pd.DataFrame(correlation_rows).sort_values("median_pairwise_corr", ascending=False, na_position="last")
     cv_summary = pd.DataFrame(cv_rows).sort_values("median_CV", ascending=False, na_position="last")
 
-    cv_summary.to_csv(CV_SUMMARY_CSV, index=False)
-    print(f"✓ cv_summary.csv saved → {CV_SUMMARY_CSV} ({CV_SUMMARY_CSV.stat().st_size:,} bytes)")
-
     variability_combined = corr_df.merge(cv_summary, on=replicate_group_cols, how="outer")
-    variability_combined.to_csv(WITHIN_GROUP_VARIABILITY_CSV, index=False)
-    print(f"✓ within_group_variability.csv saved → {WITHIN_GROUP_VARIABILITY_CSV} ({WITHIN_GROUP_VARIABILITY_CSV.stat().st_size:,} bytes)")
+    try:
+        _cv_status = write_summary_table_protected(
+            cv_summary, CV_SUMMARY_CSV, overwrite=OVERWRITE_EXISTING_OUTPUTS
+        )
+        _variability_status = write_summary_table_protected(
+            variability_combined,
+            WITHIN_GROUP_VARIABILITY_CSV,
+            overwrite=OVERWRITE_EXISTING_OUTPUTS,
+        )
+    except FileExistsError as _error:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**A protected NB02 summary differs from the current result.**\n\n"
+                    f"`{_error}`\n\nReview the changed configuration/data. If replacement is intended, "
+                    "enable **Overwrite existing outputs** under Advanced settings and rerun."
+                ),
+                kind="danger",
+            ),
+        )
+    print(f"✓ CV summary {_cv_status}: {CV_SUMMARY_CSV}")
+    print(f"✓ Within-group variability table {_variability_status}: {WITHIN_GROUP_VARIABILITY_CSV}")
 
     corr_warn_threshold = float(corr_warn_threshold_input.value)
     cv_warn_threshold = float(cv_warn_threshold_input.value)
-    low_correlation = corr_df[corr_df["median_pairwise_corr"] < corr_warn_threshold]
-    if not low_correlation.empty:
+    evaluable_correlation = corr_df[corr_df["median_pairwise_corr"].notna()]
+    low_correlation = evaluable_correlation[
+        evaluable_correlation["median_pairwise_corr"] < corr_warn_threshold
+    ]
+    if evaluable_correlation.empty:
+        sc09_status = "SKIP"
+        print("SC-09 SKIP — no condition has at least two replicate wells")
+    elif not low_correlation.empty:
+        sc09_status = "WARN"
         print(f"⚠️  {len(low_correlation)} condition(s) below correlation threshold {corr_warn_threshold:.2f}")
     else:
+        sc09_status = "PASS"
         print(f"✓  All evaluable conditions have median pairwise correlation ≥ {corr_warn_threshold:.2f}")
 
     def _condition_label(frame):
@@ -975,16 +1173,32 @@ def _(
 
     fig_sc09.tight_layout()
     _sc09_path = FIGS_DIR / "sc09_within_group_variability.png"
-    fig_sc09.savefig(_sc09_path, dpi=150, bbox_inches="tight")
-    print(f"✓ Figure saved and displayed: {_sc09_path} ({_sc09_path.stat().st_size:,} bytes)")
+    if _sc09_path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
+        print(f"ℹ Existing SC-09 figure protected; current figure is displayed but not written: {_sc09_path}")
+    else:
+        _figure_action = "replaced" if _sc09_path.exists() else "created"
+        fig_sc09.savefig(_sc09_path, dpi=150, bbox_inches="tight")
+        print(f"✓ SC-09 figure {_figure_action} and displayed: {_sc09_path} ({_sc09_path.stat().st_size:,} bytes)")
     fig_sc09
-    return
+    return corr_df, cv_summary, low_correlation, sc09_status, variability_combined
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 8 — Feature selection (pycytominer `feature_select`) — SC-10
+    ## 8 — Feature selection (pycytominer `feature_select`)
+
+    ### SC-10 — Feature-retention check
+
+    **What it evaluates:** how many normalized morphology features remain after
+    removing low-variance, highly correlated, or otherwise unsuitable features.
+
+    **How to read it:** PASS means at least 50 usable features remain. WARN means
+    fewer than 50 remain and downstream models may be unstable or biologically
+    narrow; review the earlier missingness and normalization guards before
+    continuing. The threshold is advisory and does not measure phenotype
+    activity. An empty profile or a matrix containing missing/infinite values is
+    a blocking failure.
     """)
     return
 
@@ -993,6 +1207,7 @@ def _(mo):
 def _(
     CELL_COUNT_METADATA_COLUMN,
     OVERWRITE_EXISTING_OUTPUTS,
+    PW_FEATURES_SELECTED_CSV,
     PW_FEATURES_SELECTED_PARQUET,
     analysis_plates,
     checkpoint_matches_plate_scope,
@@ -1000,16 +1215,27 @@ def _(
     enforce_pascalcase_metadata_columns,
     feat_cols_norm,
     infer_feature_cols,
+    mo,
+    print,
     select_features,
+    technical_identifier_columns,
     use_checkpoints_input,
     validate_checkpoint_df,
+    write_csv_protected,
     write_parquet_protected,
 ):
     _feature_scope_matches = checkpoint_matches_plate_scope(
         PW_FEATURES_SELECTED_PARQUET, analysis_plates
     )
-    if use_checkpoints_input.value and _feature_scope_matches and not OVERWRITE_EXISTING_OUTPUTS:
-        import pandas as _pd
+    import pandas as _pd
+
+    _checkpoint_identifiers = []
+    if use_checkpoints_input.value and _feature_scope_matches and PW_FEATURES_SELECTED_PARQUET.exists():
+        _checkpoint_schema = _pd.read_parquet(PW_FEATURES_SELECTED_PARQUET)
+        _checkpoint_identifiers = technical_identifier_columns(_checkpoint_schema)
+    _feature_checkpoint_current = _feature_scope_matches and not _checkpoint_identifiers
+
+    if use_checkpoints_input.value and _feature_checkpoint_current and not OVERWRITE_EXISTING_OUTPUTS:
 
         df_feature_selected = _pd.read_parquet(PW_FEATURES_SELECTED_PARQUET)
         if CELL_COUNT_METADATA_COLUMN not in df_feature_selected.columns:
@@ -1027,16 +1253,15 @@ def _(
     else:
         if use_checkpoints_input.value and PW_FEATURES_SELECTED_PARQUET.exists() and not _feature_scope_matches:
             print("  ℹ️  Invalidated feature-selected checkpoint because its plate scope changed")
-        n_before = len(feat_cols_norm)
+        if _checkpoint_identifiers:
+            print("  ℹ️  Invalidated legacy feature-selected checkpoint: technical identifier columns were detected")
+            print(f"     Columns to remove: {len(_checkpoint_identifiers):,}")
         df_feature_selected = select_features(df_normalized, "infer")
-        final_feature_cols = infer_feature_cols(df_feature_selected)
-        n_after = len(final_feature_cols)
 
-        print("── SC-10: Feature selection report ──")
-        print(f"  Features before : {n_before}")
-        print(f"  Features after  : {n_after}")
-        print(f"  Features removed: {n_before - n_after} ({(n_before - n_after) / n_before:.1%})")
-        print("  SC-10: WARN — very few features remaining" if n_after < 50 else "  SC-10: PASS")
+        _selected_identifiers = technical_identifier_columns(df_feature_selected)
+        if _selected_identifiers:
+            df_feature_selected = df_feature_selected.drop(columns=_selected_identifiers)
+            print(f"  ✓ Removed {len(_selected_identifiers):,} technical identifier column(s) from the final profile")
 
         df_feature_selected = enforce_pascalcase_metadata_columns(df_feature_selected)
 
@@ -1060,16 +1285,173 @@ def _(
         if missing_meta:
             raise ValueError(f"Required metadata columns missing: {missing_meta}")
 
-        export_status = write_parquet_protected(
-            df_feature_selected,
-            PW_FEATURES_SELECTED_PARQUET,
-            overwrite=OVERWRITE_EXISTING_OUTPUTS or not _feature_scope_matches,
-        )
+        try:
+            export_status = write_parquet_protected(
+                df_feature_selected,
+                PW_FEATURES_SELECTED_PARQUET,
+                overwrite=(
+                    OVERWRITE_EXISTING_OUTPUTS
+                    or not _feature_scope_matches
+                    or bool(_checkpoint_identifiers)
+                ),
+            )
+        except FileExistsError as _error:
+            mo.stop(
+                True,
+                mo.callout(
+                    mo.md(
+                        "**The protected final Parquet differs from the current result.**\n\n"
+                        f"`{_error}`\n\nReview the changed configuration/data. If replacement is intended, "
+                        "enable **Overwrite existing outputs** under Advanced settings and rerun."
+                    ),
+                    kind="danger",
+                ),
+            )
         _status_label = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(export_status, export_status)
         print(f"✓ Feature-selected profile: {_status_label}")
         print(f"  File: {PW_FEATURES_SELECTED_PARQUET}")
         print(f"  Verified: {PW_FEATURES_SELECTED_PARQUET.stat().st_size:,} bytes")
-    return (df_feature_selected,)
+
+    final_feature_cols = infer_feature_cols(df_feature_selected)
+    n_before = len(feat_cols_norm)
+    n_after = len(final_feature_cols)
+    if df_feature_selected.empty:
+        raise ValueError("The final profile contains no wells.")
+    if not final_feature_cols:
+        raise ValueError("The final profile contains no features.")
+    final_values = df_feature_selected[final_feature_cols].replace(
+        [float("inf"), float("-inf")], None
+    )
+    if int(final_values.isna().sum().sum()) > 0:
+        raise ValueError("The final feature matrix still contains missing/inf values.")
+
+    print("── SC-10: Feature-retention check ──")
+    print(f"  Features before:  {n_before:,}")
+    print(f"  Features after:   {n_after:,}")
+    print(f"  Features removed: {n_before - n_after:,} ({(n_before - n_after) / n_before:.1%})")
+    sc10_status = "WARN" if n_after < 50 else "PASS"
+    if sc10_status == "WARN":
+        print("  SC-10 WARN — fewer than 50 features remain; review earlier cleaning guards")
+    else:
+        print("  ✓ SC-10 PASS — sufficient usable features remain for downstream profiling")
+
+    try:
+        csv_export_status = write_csv_protected(
+            df_feature_selected,
+            PW_FEATURES_SELECTED_CSV,
+            overwrite=OVERWRITE_EXISTING_OUTPUTS,
+        )
+    except FileExistsError as _error:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**The protected interoperability CSV differs from the current result.**\n\n"
+                    f"`{_error}`\n\nEnable **Overwrite existing outputs** only after confirming that "
+                    "the new schema is expected."
+                ),
+                kind="danger",
+            ),
+        )
+    print(f"✓ Interoperability CSV {csv_export_status}: {PW_FEATURES_SELECTED_CSV}")
+    return df_feature_selected, sc10_status
+
+
+@app.cell
+def _(
+    expected_wells,
+    low_correlation,
+    n_extreme_magnitude_features,
+    n_missing_treatment,
+    n_near_zero_mad_features,
+    plate_silhouette,
+    sc06_status,
+    sc07_status,
+    sc07b_status,
+    sc08_status,
+    sc09_status,
+    sc09b_status,
+    sc10_status,
+    mo,
+    pd,
+):
+    _near_zero_evidence = (
+        "Validated normalized checkpoint reused; original removal evidence was not recomputed"
+        if n_near_zero_mad_features is None
+        else f"{n_near_zero_mad_features:,} near-zero-control-MAD feature(s) detected and removed"
+    )
+    _extreme_evidence = (
+        "Validated normalized checkpoint reused; original removal evidence was not recomputed"
+        if n_extreme_magnitude_features is None
+        else f"{n_extreme_magnitude_features:,} extreme-magnitude feature(s) detected and removed"
+    )
+    sanity_check_summary = pd.DataFrame(
+        [
+            {
+                "Check": "SC-06 — Treatment annotation coverage",
+                "Status": sc06_status,
+                "Evidence": f"{n_missing_treatment:,} cell(s) without treatment annotation",
+                "How to act": "Review barcode/platemap mappings if WARN",
+            },
+            {
+                "Check": "SC-07 — One profile per observed well",
+                "Status": sc07_status,
+                "Evidence": f"Aggregation retained all {expected_wells:,} observed well(s)",
+                "How to act": "Blocking if counts differ; inspect grouping metadata",
+            },
+            {
+                "Check": "SC-07b — Near-zero control MAD guard",
+                "Status": sc07b_status,
+                "Evidence": _near_zero_evidence,
+                "How to act": "Review removed features and negative-control coverage if WARN",
+            },
+            {
+                "Check": "SC-08 — Residual plate structure",
+                "Status": sc08_status,
+                "Evidence": (
+                    f"Post-normalization plate silhouette = {plate_silhouette:.3f}"
+                    if plate_silhouette is not None
+                    else "Plate silhouette unavailable for a single plate or insufficient samples"
+                ),
+                "How to act": "Interpret plate separation; do not automatically batch-correct",
+            },
+            {
+                "Check": "SC-09 — Replicate consistency",
+                "Status": sc09_status,
+                "Evidence": f"{len(low_correlation):,} evaluable condition(s) below the correlation threshold",
+                "How to act": "Inspect low-consistency conditions and replicate quality",
+            },
+            {
+                "Check": "SC-09b — Extreme normalized magnitude guard",
+                "Status": sc09b_status,
+                "Evidence": _extreme_evidence,
+                "How to act": "Review normalization and removed features if WARN",
+            },
+            {
+                "Check": "SC-10 — Feature retention",
+                "Status": sc10_status,
+                "Evidence": "Final feature matrix is finite and non-empty",
+                "How to act": "Review cleaning thresholds if fewer than 50 features remain",
+            },
+        ]
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ## Sanity-check interpretation summary
+
+                PASS confirms the stated technical condition, WARN identifies a
+                review item or a corrective removal, INFO is descriptive, SKIP
+                means the check is not valid for this design, and REUSED means a
+                validated checkpoint was loaded without recomputing its original
+                removal evidence. These checks do not establish phenotypic activity.
+                """
+            ),
+            sanity_check_summary,
+        ]
+    )
+    return (sanity_check_summary,)
 
 
 @app.cell
@@ -1081,7 +1463,7 @@ def _(mo):
 
 
 @app.cell
-def _(df_feature_selected, infer_feature_cols):
+def _(df_feature_selected, infer_feature_cols, print):
     feat_cols_final = infer_feature_cols(df_feature_selected)
     print("═" * 60)
     print("NB02 complete")
@@ -1102,21 +1484,27 @@ def _(
     CONFIG,
     CV_SUMMARY_CSV,
     EXPERIMENT_ID,
+    INPUT_PARQUET,
     NEGCON_VALUES,
     NORM_CONTROL,
+    PW_FEATURES_SELECTED_CSV,
     PW_FEATURES_SELECTED_PARQUET,
     REPO_ROOT,
     RESULTS_DIR,
+    SC_READY_PARQUET,
     WITHIN_GROUP_VARIABILITY_CSV,
+    analysis_plates,
     corr_warn_threshold_input,
     df_feature_selected,
     feat_cols_final,
     json,
     max_missing_fraction_input,
     platform,
+    print,
     subprocess,
 ):
     from datetime import datetime, timezone
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
 
     def run_git_command(arguments, repo_root):
         try:
@@ -1128,7 +1516,7 @@ def _(
         return result.stdout.strip() or None if result.returncode == 0 else None
 
     provenance_nb02 = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pipeline": {
             "notebook": "02_aggregate_normalize_featureselect.py",
             "experiment_id": EXPERIMENT_ID,
@@ -1143,6 +1531,7 @@ def _(
             "concentration_col": CONFIG.concentration_col,
             "has_dose_axis": CONFIG.has_dose_axis,
             "analysis_mode": CONFIG.analysis_mode,
+            "overwrite_existing_outputs": CONFIG.overwrite_existing_outputs,
             "included_plates": analysis_plates,
             "excluded_plate_reasons": CONFIG.excluded_plate_reasons,
             "required_reference_treatments": CONFIG.required_reference_treatments,
@@ -1158,22 +1547,42 @@ def _(
         "environment": {"python_version": platform.python_version()},
         "outputs": {
             "per_well_features_selected_parquet": str(PW_FEATURES_SELECTED_PARQUET),
+            "per_well_features_selected_csv": str(PW_FEATURES_SELECTED_CSV),
             "cv_summary_csv": str(CV_SUMMARY_CSV),
             "within_group_variability_csv": str(WITHIN_GROUP_VARIABILITY_CSV),
         },
     }
+    _declared_outputs = [
+        SC_READY_PARQUET,
+        PW_FEATURES_SELECTED_PARQUET,
+        PW_FEATURES_SELECTED_CSV,
+        CV_SUMMARY_CSV,
+        WITHIN_GROUP_VARIABILITY_CSV,
+    ]
+    provenance_nb02 = canonicalize_provenance(
+        provenance_nb02,
+        notebook="02_aggregate_normalize_featureselect.py",
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=_declared_outputs,
+    )
+    _provenance_payload = provenance_json(provenance_nb02)
     provenance_nb02_path = RESULTS_DIR / "provenance_nb02.json"
-    with provenance_nb02_path.open("w", encoding="utf-8") as _f:
-        json.dump(provenance_nb02, _f, indent=2, ensure_ascii=False)
-    print(f"✓ Provenance saved: {provenance_nb02_path}")
+    if provenance_nb02_path.exists() and not CONFIG.overwrite_existing_outputs:
+        _provenance_status = "unchanged (existing provenance protected)"
+    else:
+        _provenance_status = "replaced" if provenance_nb02_path.exists() else "created"
+        provenance_nb02_path.write_text(_provenance_payload, encoding="utf-8")
+    print(f"✓ Provenance {_provenance_status}: {provenance_nb02_path}")
+    print(f"  Schema v{provenance_nb02['schema_version']} · inputs hashed: {len(provenance_nb02['dependencies'])} · outputs recorded: {len(provenance_nb02['outputs'])}")
 
     if CONFIG.save_provenance_history:
         _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         _history_path = RESULTS_DIR / f"provenance_nb02_{_timestamp}.json"
         if _history_path.exists():
             raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
-        with _history_path.open("w", encoding="utf-8") as _f:
-            json.dump(provenance_nb02, _f, indent=2, ensure_ascii=False)
+        _history_path.write_text(_provenance_payload, encoding="utf-8")
         print(f"✓ Historical record: {_history_path}")
     else:
         print("  Historical record: disabled")
@@ -1181,45 +1590,17 @@ def _(
 
 
 @app.cell
-def _(
-    CV_SUMMARY_CSV,
-    FIGS_DIR,
-    PW_FEATURES_SELECTED_PARQUET,
-    WITHIN_GROUP_VARIABILITY_CSV,
-    df_feature_selected,
-    feat_cols_final,
-    mo,
-    provenance_nb02_path,
-):
-    _required_outputs = [
-        PW_FEATURES_SELECTED_PARQUET,
-        CV_SUMMARY_CSV,
-        WITHIN_GROUP_VARIABILITY_CSV,
-        FIGS_DIR / "sc08_plate_effect_pca.png",
-        FIGS_DIR / "sc09_within_group_variability.png",
-        provenance_nb02_path,
-    ]
-    _missing_outputs = [path for path in _required_outputs if not path.is_file()]
-    mo.stop(
-        bool(_missing_outputs),
-        mo.callout(
-            mo.md(
-                "**NB02 did not complete successfully.**\n\n"
-                "Required output(s) are missing:\n"
-                + "\n".join(f"- `{path}`" for path in _missing_outputs)
-                + "\n\nReview the first error or warning above. Do not continue to NB03 yet."
-            ),
-            kind="danger",
-        ),
-    )
+def _(CV_SUMMARY_CSV, FIGS_DIR, PW_FEATURES_SELECTED_CSV, PW_FEATURES_SELECTED_PARQUET, WITHIN_GROUP_VARIABILITY_CSV, df_feature_selected, feat_cols_final, mo, print, provenance_nb02_path):
+    _required = [PW_FEATURES_SELECTED_PARQUET, PW_FEATURES_SELECTED_CSV, CV_SUMMARY_CSV, WITHIN_GROUP_VARIABILITY_CSV, FIGS_DIR / "sc08_plate_effect_pca.png", FIGS_DIR / "sc09_within_group_variability.png", provenance_nb02_path]
+    _missing = [path for path in _required if not path.is_file()]
+    mo.stop(bool(_missing), mo.callout(mo.md("**NB02 did not complete successfully.**\n\nMissing required outputs:\n" + "\n".join(f"- `{path}`" for path in _missing) + "\n\nDo not continue to NB03."), kind="danger"))
     print("═" * 72)
     print("NB02 COMPLETED — ALL REQUIRED OUTPUTS VERIFIED")
     print("═" * 72)
-    print(f"  Final wells:    {len(df_feature_selected):,}")
-    print(f"  Final features: {len(feat_cols_final):,}")
-    for _path in _required_outputs:
+    print(f"  Final wells: {len(df_feature_selected):,} · features: {len(feat_cols_final):,}")
+    for _path in _required:
         print(f"  ✓ {_path} ({_path.stat().st_size:,} bytes)")
-    print("\n✓ Safe to continue to NB03 — Quality Metrics")
+    print("\n✓ Safe to continue to NB03")
     return
 
 
@@ -1235,47 +1616,30 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Save two complementary snapshots of the notebook's **current session**:
+
+    - **HTML** preserves the complete record, including code and rich outputs;
+    - **PDF** is a clean reading copy without code inputs.
+
+    Saving does not rerun cells or regenerate stochastic results. On Chromium,
+    select `workspace/analysis/<experiment>/reports` the first time and the
+    browser will remember it. Safari presents separate HTML and PDF download
+    buttons because it cannot write directly to a chosen folder.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_02_aggregate_normalize_featureselect",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 

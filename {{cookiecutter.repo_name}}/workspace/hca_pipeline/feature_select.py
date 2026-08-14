@@ -8,7 +8,12 @@ import pandas as pd
 
 from .config import COMPARTMENT_PREFIXES
 
-TECHNICAL_SUFFIXES = ("_ImageNumber", "_ObjectNumber")
+TECHNICAL_IDENTIFIER_PATTERNS = (
+    "ImageNumber",
+    "ObjectNumber",
+    "Number_Object_Number",
+    "Parent_",
+)
 
 DEFAULT_FEATURE_SELECT_OPERATIONS = (
     "variance_threshold",
@@ -18,13 +23,29 @@ DEFAULT_FEATURE_SELECT_OPERATIONS = (
 )
 
 
+def is_technical_identifier_column(column: str) -> bool:
+    """Return whether *column* stores object identity/linkage rather than phenotype.
+
+    The match is intentionally not suffix-only: aggregation can produce names
+    such as ``Cells_Mean_Vesicles_Number_Object_Number`` while preserving the
+    technical identifier token in the middle of the resulting column name.
+    """
+    column = str(column)
+    return any(pattern in column for pattern in TECHNICAL_IDENTIFIER_PATTERNS)
+
+
+def technical_identifier_columns(df: pd.DataFrame) -> list[str]:
+    """List CellProfiler identity/linkage columns present in *df*."""
+    return [c for c in df.columns if is_technical_identifier_column(c)]
+
+
 def infer_feature_cols(df: pd.DataFrame) -> list[str]:
     """Return feature columns: those starting with a compartment prefix
     (:data:`hca_pipeline.config.COMPARTMENT_PREFIXES`) and not starting with
     ``Metadata_``.
 
-    Also excludes columns ending with technical identifiers (``_ImageNumber``,
-    ``_ObjectNumber``) that should never be treated as features.
+    Also excludes CellProfiler object-identity and parent-linkage columns,
+    including identifier tokens preserved inside aggregated column names.
 
     Falls back to all non-``Metadata_`` numeric columns if no
     compartment-prefixed columns are found.
@@ -34,14 +55,14 @@ def infer_feature_cols(df: pd.DataFrame) -> list[str]:
         for c in df.columns
         if c.startswith(COMPARTMENT_PREFIXES)
         and not c.startswith("Metadata_")
-        and not c.endswith(TECHNICAL_SUFFIXES)
+        and not is_technical_identifier_column(c)
     ]
     if not feat_cols:
         feat_cols = [
             c
             for c in df.columns
             if not c.startswith("Metadata_")
-            and not c.endswith(TECHNICAL_SUFFIXES)
+            and not is_technical_identifier_column(c)
             and df[c].dtype in ("float64", "float32", "int64", "int32")
         ]
     return feat_cols

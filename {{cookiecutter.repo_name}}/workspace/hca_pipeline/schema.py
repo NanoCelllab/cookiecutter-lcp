@@ -102,7 +102,7 @@ def validate_checkpoint(
 
     is_metadata = schema_df["column"].str.startswith("Metadata_")
     feature_dtypes = schema_df.loc[~is_metadata, "dtype"]
-    # bool is a legitimate, DuckDB-friendly non-metadata dtype (e.g. NB07's
+    # bool is a legitimate, DuckDB-friendly non-metadata dtype (e.g. recovery-axis extra's
     # recovery-axis flags) -- only string/object columns are a real problem.
     non_numeric = feature_dtypes[~feature_dtypes.str.contains(r"int|float|double|bool", case=False, regex=True)]
     if len(non_numeric):

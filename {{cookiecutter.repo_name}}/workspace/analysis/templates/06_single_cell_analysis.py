@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -17,7 +22,7 @@ def _(mo):
     # 06 — Single-Cell Analysis
 
     **Pipeline step:** 6 of 6
-    **Input:** `single_cell_ready.parquet` (from NB02 cache — annotated, QC-cleaned, pre-aggregation)
+    **Input:** `single_cell_ready.parquet` (declared NB02 output — annotated, QC-cleaned, pre-aggregation)
     **Output:** Single-cell PCA/UMAP/clustering figures, LightGBM classification report, SHAP CSVs
 
     > **Memory note:** this notebook can load hundreds of thousands of
@@ -33,28 +38,27 @@ def _(mo):
     4. PCA and (if installed) UMAP on the sampled single-cell data.
     5. HDBSCAN and KMeans clustering on the top PCs.
     6. LightGBM classifier (treatment label) with `GroupShuffleSplit` by well.
-    7. SHAP feature importance + cross-check with NB04 LDA loadings (SC-17).
+    7. SHAP feature importance plus an optional compatible-loading cross-check (SC-17).
 
-    ### Fixes relative to the original notebook
+    Single-cell analysis is optional: it explores cell-state heterogeneity
+    after the required per-well workflow is complete. A weak or uninformative
+    result here does not invalidate the per-well experiment. The same balanced,
+    treatment-stratified sample is used consistently for embeddings,
+    clustering, and classification.
+    """)
+    return
 
-    - **De-duplicated feature curation and sampling.** The source notebook
-      computed its feature-cleaning logic twice (a simpler pass, then a
-      more complete one a few cells later) and re-ran cell subsampling
-      four times with identical logic — remnants of iterative
-      development. This version calls each step exactly once, via
-      `hca_pipeline.single_cell`.
-    - **Fixed a real bug: balanced sampling was silently discarded.** The
-      source notebook's own docs state step 3 is "balanced sampling
-      stratified by treatment," and it does compute one — but the very
-      same variable names (`df_sampled`/`X_sampled`) get reassigned by
-      later cells to a *plain random* subsample instead, so the balanced
-      sample was never actually used for PCA, clustering, or the LightGBM
-      classifier. This version performs the balanced, per-treatment-capped
-      sample exactly once and uses it consistently everywhere downstream.
-    - **The "phenotypic recovery axis" section (a bespoke geometric
-      analysis assuming two specific reference-state treatment labels)
-      has been extracted into its own optional notebook** rather than
-      hard-required here — see the notebook alongside this one.
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### What this notebook cannot tell you
+
+    Weak or unstable single-cell clusters do not invalidate reproducible
+    per-well phenotypes from NB03–NB05. Conversely, visually separated cells
+    do not by themselves prove a biological subpopulation: sampling, cell
+    count, segmentation and imaging quality can create similar structure.
+    Treat this notebook as a complementary heterogeneity analysis.
     """)
     return
 
@@ -84,6 +88,7 @@ def _():
 
         UMAP_OK = True
     except ImportError:
+        umap = None
         UMAP_OK = False
 
     try:
@@ -119,7 +124,7 @@ def _():
 
 
 @app.cell
-def _(Path):
+def _(Path, print):
     import sys
 
     _notebook_path = Path(__file__).resolve()
@@ -144,6 +149,11 @@ def _(Path):
     from hca_pipeline.feature_select import infer_feature_cols
     from hca_pipeline.io import write_csv_protected, write_parquet_protected
     from hca_pipeline.modelling import balanced_sample
+    from hca_pipeline.plotting import (
+        add_categorical_legend,
+        categorical_palette,
+        save_figure_protected,
+    )
     from hca_pipeline.single_cell import (
         curate_single_cell_features,
         fit_hdbscan,
@@ -157,11 +167,16 @@ def _(Path):
     return (
         ExperimentConfig,
         REPO_ROOT,
+        add_categorical_legend,
         balanced_sample,
+        categorical_palette,
         curate_single_cell_features,
         fit_hdbscan,
+        infer_feature_cols,
         mahal_outliers_within_well,
+        save_figure_protected,
         train_lgbm_classifier_with_shap,
+        write_csv_protected,
         write_parquet_protected,
     )
 
@@ -199,7 +214,7 @@ def _(ExperimentConfig, REPO_ROOT, experiment_id_input):
 
 
 @app.cell
-def _(mo):
+def _(loaded_config, mo):
     n_cells_per_treatment_input = mo.ui.number(
         value=5000, start=100, stop=1_000_000,
         label="Max cells per treatment (balanced sample used for PCA/UMAP/clustering/classification)",
@@ -214,22 +229,22 @@ def _(mo):
     hdbscan_min_cluster_size_input = mo.ui.number(value=30, start=2, stop=1000, label="HDBSCAN min_cluster_size")
     hdbscan_min_samples_input = mo.ui.number(value=5, start=1, stop=200, label="HDBSCAN min_samples")
     kmeans_k_max_input = mo.ui.number(value=15, start=3, stop=50, label="KMeans: max k to try")
-    overwrite_input = mo.ui.checkbox(value=False, label="Overwrite existing outputs")
-    save_history_input = mo.ui.checkbox(value=False, label="Save timestamped provenance history")
-
-    mo.vstack(
-        [
-            n_cells_per_treatment_input,
-            n_pca_components_input,
-            nan_threshold_input,
-            mahal_percentile_input,
-            hdbscan_min_cluster_size_input,
-            hdbscan_min_samples_input,
-            kmeans_k_max_input,
-            overwrite_input,
-            save_history_input,
-        ]
+    random_state_input = mo.ui.number(value=42, start=0, stop=10_000, label="Random seed")
+    overwrite_input = mo.ui.checkbox(
+        value=loaded_config.overwrite_existing_outputs,
+        label="Overwrite existing outputs",
     )
+    save_history_input = mo.ui.checkbox(
+        value=loaded_config.save_provenance_history,
+        label="Save timestamped provenance history",
+    )
+
+    mo.accordion({"Advanced single-cell and output settings": mo.vstack([
+        n_cells_per_treatment_input, n_pca_components_input, nan_threshold_input,
+        mahal_percentile_input, hdbscan_min_cluster_size_input,
+        hdbscan_min_samples_input, kmeans_k_max_input, random_state_input, overwrite_input,
+        save_history_input,
+    ])})
     return (
         hdbscan_min_cluster_size_input,
         hdbscan_min_samples_input,
@@ -239,23 +254,34 @@ def _(mo):
         n_pca_components_input,
         nan_threshold_input,
         overwrite_input,
+        random_state_input,
         save_history_input,
     )
 
 
 @app.cell
-def _(REPO_ROOT, experiment_id_input, loaded_config):
+def _(REPO_ROOT, experiment_id_input, loaded_config, overwrite_input, print, random_state_input, save_history_input):
     from dataclasses import replace
 
     EXPERIMENT_ID = experiment_id_input.value
-    CONFIG = replace(loaded_config, experiment_id=EXPERIMENT_ID)
-    CONFIG.save(REPO_ROOT)
+    CONFIG = replace(
+        loaded_config,
+        experiment_id=EXPERIMENT_ID,
+        overwrite_existing_outputs=bool(overwrite_input.value),
+        save_provenance_history=bool(save_history_input.value),
+    )
+    _config_path = CONFIG.save(REPO_ROOT)
+    RANDOM_STATE = int(random_state_input.value)
     print(f"  Experiment ID: {EXPERIMENT_ID}")
-    return CONFIG, EXPERIMENT_ID
+    print(f"  Overwrite existing outputs: {CONFIG.overwrite_existing_outputs}")
+    print(f"  Save provenance history: {CONFIG.save_provenance_history}")
+    print(f"  Random seed: {RANDOM_STATE}")
+    print(f"  Saved configuration: {_config_path}")
+    return CONFIG, EXPERIMENT_ID, RANDOM_STATE
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, print):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
     PROFILES_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID
@@ -268,7 +294,14 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     for _d in (FIGS_DIR, RESULTS_DIR):
         _d.mkdir(parents=True, exist_ok=True)
 
-    INPUT_PARQUET = CACHE_DIR / "single_cell_ready.parquet"
+    INPUT_PARQUET = PROFILES_OUT_DIR / "single_cell_ready.parquet"
+    _legacy_input = CACHE_DIR / "single_cell_ready.parquet"
+    if not INPUT_PARQUET.exists() and _legacy_input.exists():
+        INPUT_PARQUET = _legacy_input
+        print(
+            "  ℹ Using the legacy NB02 cache location for compatibility. "
+            "Rerun NB02 once to promote this file to a declared output."
+        )
     LDA_LOADINGS_CSV = RESULTS_DIR / "lda_loadings.csv"
     SHAP_SUMMARY_CSV = RESULTS_DIR / "shap_summary.csv"
     CLF_REPORT_CSV = RESULTS_DIR / "lgbm_classification_report.csv"
@@ -298,7 +331,7 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, GO_NOGO_REPORT, INPUT_PARQUET, pd):
+def _(CONFIG, GO_NOGO_REPORT, INPUT_PARQUET, pd, print):
     df_sc = pd.read_parquet(INPUT_PARQUET)
     df_sc = df_sc.loc[:, ~df_sc.columns.str.contains("ImageNumber|ObjectNumber")]
 
@@ -314,7 +347,14 @@ def _(CONFIG, GO_NOGO_REPORT, INPUT_PARQUET, pd):
     else:
         print("  ℹ️  NB03 Go/No-Go report not found yet.")
 
-    feat_cols_raw = [c for c in df_sc.columns if c.startswith(("Cells_", "Cytoplasm_", "Nuclei_", "Vesicles_")) and not c.startswith("Metadata_")]
+    feat_cols_raw = infer_feature_cols(df_sc)
+    if len(df_sc) < 3:
+        raise ValueError(
+            f"Single-cell input contains only {len(df_sc)} cells; at least three are required "
+            "for PCA and exploratory clustering."
+        )
+    if not feat_cols_raw:
+        raise ValueError("No CellProfiler single-cell feature columns were found in the input parquet.")
     print(f"  Shape: {df_sc.shape[0]:,} cells × {df_sc.shape[1]} cols")
     print(f"  Feature columns: {len(feat_cols_raw)}")
     print(f"  Treatments: {df_sc[RESOLVED_CONFIG.treatment_col].nunique()}")
@@ -326,16 +366,25 @@ def _(mo):
     mo.md(r"""
     ## 3 — Sanity checks (SC-14 → SC-16)
 
-    - **SC-14:** cell-count-per-well distribution (violin, per treatment).
-    - **SC-15:** feature completeness (% NaN per feature).
-    - **SC-16:** outlier cells (Mahalanobis distance > configured
-      percentile, computed within each well on a quick 20-component PCA).
+    These are advisory single-cell diagnostics, not a second Go/No-Go gate:
+
+    - **SC-14 — Cell representation by well:** compares per-well cell counts
+      across treatments. Strong imbalance can make abundant wells dominate;
+      inspect unusually sparse groups before interpreting cell states.
+    - **SC-15 — Feature completeness:** counts features above the configured
+      missing-value threshold. Those features are removed during curation;
+      `WARN` identifies information loss but does not automatically invalidate
+      the experiment.
+    - **SC-16 — Within-well outlier cells:** flags cells above the configured
+      Mahalanobis percentile in a compact PCA space. More than 5% is `WARN` and
+      should trigger image/segmentation review. Flagged cells are excluded from
+      this optional analysis, not from earlier per-well results.
     """)
     return
 
 
 @app.cell
-def _(FIGS_DIR, RESOLVED_CONFIG, df_sc, plt, sns):
+def _(CONFIG, FIGS_DIR, RESOLVED_CONFIG, categorical_palette, df_sc, plt, print, save_figure_protected, sns):
     counts_per_well = (
         df_sc.groupby([RESOLVED_CONFIG.plate_col, RESOLVED_CONFIG.well_col, RESOLVED_CONFIG.treatment_col])
         .size()
@@ -346,22 +395,30 @@ def _(FIGS_DIR, RESOLVED_CONFIG, df_sc, plt, sns):
     sns.violinplot(
         data=counts_per_well, x=RESOLVED_CONFIG.treatment_col, y="n_cells",
         hue=RESOLVED_CONFIG.treatment_col, order=_order, hue_order=_order,
-        palette="tab10", legend=False, ax=ax_sc14, inner="box", cut=0,
+        palette=categorical_palette(len(_order)), legend=False, ax=ax_sc14, inner="box", cut=0,
     )
     ax_sc14.set_xlabel("Treatment")
     ax_sc14.set_ylabel("Cells per well")
     ax_sc14.set_title("SC-14: Cell count distribution per well")
     plt.setp(ax_sc14.get_xticklabels(), rotation=30, ha="right")
     fig_sc14.tight_layout()
-    fig_sc14.savefig(FIGS_DIR / "sc14_cell_count_violin.png", dpi=150, bbox_inches="tight")
+    _sc14_path = FIGS_DIR / "sc14_cell_count_violin.png"
+    _sc14_status = save_figure_protected(
+        fig_sc14, _sc14_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=150, bbox_inches="tight",
+    )
     plt.close(fig_sc14)
-    print(f"  ✓  Saved: sc14_cell_count_violin.png (median cells/well: {counts_per_well['n_cells'].median():.0f})")
+    print(f"  ✓ SC-14 figure {_sc14_status}: {_sc14_path} (median cells/well: {counts_per_well['n_cells'].median():.0f})")
+    print(
+        "  INFO — SC-14 is visual/advisory: inspect treatments with systematically "
+        "low cell counts or unusually broad well-to-well variation."
+    )
     fig_sc14
     return
 
 
 @app.cell
-def _(df_sc, feat_cols_raw, nan_threshold_input):
+def _(df_sc, feat_cols_raw, nan_threshold_input, print):
     nan_frac = df_sc[feat_cols_raw].isna().mean()
     _nan_threshold = float(nan_threshold_input.value)
     n_high_nan = int((nan_frac > _nan_threshold).sum())
@@ -374,6 +431,7 @@ def _(df_sc, feat_cols_raw, nan_threshold_input):
 @app.cell
 def _(
     PCA,
+    RANDOM_STATE,
     RESOLVED_CONFIG,
     df_sc,
     feat_cols_raw,
@@ -381,9 +439,11 @@ def _(
     mahal_percentile_input,
     np,
     pd,
+    print,
 ):
     X_sc_raw_for_qc = df_sc[feat_cols_raw].fillna(0).replace([np.inf, -np.inf], 0).to_numpy()
-    pca_qc = PCA(n_components=min(20, X_sc_raw_for_qc.shape[1]), random_state=42)
+    _n_qc_components = min(20, X_sc_raw_for_qc.shape[0], X_sc_raw_for_qc.shape[1])
+    pca_qc = PCA(n_components=_n_qc_components, random_state=RANDOM_STATE)
     X_sc_pca_qc = pca_qc.fit_transform(X_sc_raw_for_qc)
 
     df_pca_qc = pd.DataFrame(
@@ -418,15 +478,14 @@ def _(mo):
 
     One canonical curation pass (identifier removal → low-variance
     removal → median imputation → IQR-stability guard → `RobustScaler`
-    → clip), followed by one balanced (per-treatment-capped) sample —
-    replacing the original notebook's duplicated curation logic and its
-    silently-discarded balanced-sampling step (see the fix noted above).
+    → clip), followed by one balanced, per-treatment-capped sample used
+    consistently throughout the remaining analysis.
     """)
     return
 
 
 @app.cell
-def _(curate_single_cell_features, df_sc_clean, feat_cols_raw):
+def _(curate_single_cell_features, df_sc_clean, feat_cols_raw, print):
     X_sc_full, feature_cols_model, curation_summary = curate_single_cell_features(df_sc_clean, feat_cols_raw)
     print("── Feature curation ──")
     for _key, _value in curation_summary.items():
@@ -437,14 +496,16 @@ def _(curate_single_cell_features, df_sc_clean, feat_cols_raw):
 @app.cell
 def _(
     RESOLVED_CONFIG,
+    RANDOM_STATE,
     X_sc_full,
     balanced_sample,
     df_sc_clean,
     n_cells_per_treatment_input,
+    print,
 ):
     df_sampled, X_sampled = balanced_sample(
         df_sc_clean, X_sc_full, RESOLVED_CONFIG.treatment_col,
-        int(n_cells_per_treatment_input.value), random_state=42,
+        int(n_cells_per_treatment_input.value), random_state=RANDOM_STATE,
     )
     print(f"  Balanced sample: {X_sampled.shape[0]:,} cells × {X_sampled.shape[1]} features")
     print(df_sampled[RESOLVED_CONFIG.treatment_col].value_counts().to_string())
@@ -460,9 +521,19 @@ def _(mo):
 
 
 @app.cell
-def _(FIGS_DIR, PCA, X_sampled, n_pca_components_input, np, plt):
+def _(CONFIG, FIGS_DIR, PCA, RANDOM_STATE, X_sampled, n_pca_components_input, np, plt, print, save_figure_protected):
     n_components_sc = min(int(n_pca_components_input.value), X_sampled.shape[0] - 1, X_sampled.shape[1])
-    pca_sc = PCA(n_components=n_components_sc, random_state=42)
+    if n_components_sc < 2:
+        raise ValueError(
+            f"PCA requires at least two usable components; only {n_components_sc} is available "
+            f"from {X_sampled.shape[0]} sampled cells and {X_sampled.shape[1]} curated features."
+        )
+    if n_components_sc < int(n_pca_components_input.value):
+        print(
+            f"ℹ PCA components reduced from {int(n_pca_components_input.value)} to "
+            f"{n_components_sc} to match the sampled data dimensions."
+        )
+    pca_sc = PCA(n_components=n_components_sc, random_state=RANDOM_STATE)
     X_sc_pca = pca_sc.fit_transform(X_sampled)
 
     _n_show = min(30, X_sc_pca.shape[1])
@@ -477,41 +548,50 @@ def _(FIGS_DIR, PCA, X_sampled, n_pca_components_input, np, plt):
     ax_scree.set_ylabel("Variance explained (%)")
     ax_scree.set_title("Single-cell PCA scree plot")
     fig_scree.tight_layout()
-    fig_scree.savefig(FIGS_DIR / "sc_pca_scree.png", dpi=150, bbox_inches="tight")
+    _scree_path = FIGS_DIR / "sc_pca_scree.png"
+    _scree_status = save_figure_protected(
+        fig_scree, _scree_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=150, bbox_inches="tight",
+    )
     plt.close(fig_scree)
     print(f"  PC1: {_evr[0]:.1%}  |  PC2: {_evr[1]:.1%}  |  Top-{_n_show}: {_evr.sum():.1%}")
+    print(f"  ✓ PCA scree figure {_scree_status}: {_scree_path}")
     fig_scree
     return X_sc_pca, pca_sc
 
 
 @app.cell
-def _(FIGS_DIR, RESOLVED_CONFIG, X_sc_pca, df_sampled, np, pca_sc, plt, sns):
+def _(CONFIG, FIGS_DIR, RESOLVED_CONFIG, X_sc_pca, add_categorical_legend, categorical_palette, df_sampled, np, pca_sc, plt, print, save_figure_protected, sns):
     fig_pca_scatter, axes_pca_scatter = plt.subplots(1, 2, figsize=(14, 5))
     _treatments = df_sampled[RESOLVED_CONFIG.treatment_col].astype(str).to_numpy()
     _plates = df_sampled[RESOLVED_CONFIG.plate_col].astype(str).to_numpy()
 
     for _ax, _labels, _title in [(axes_pca_scatter[0], _treatments, "Treatment"), (axes_pca_scatter[1], _plates, "Plate (batch check)")]:
         _unique_labels = sorted(np.unique(_labels))
-        _palette = sns.color_palette("tab10", n_colors=len(_unique_labels))
+        _palette = categorical_palette(len(_unique_labels))
         for _label, _color in zip(_unique_labels, _palette):
             _mask = _labels == _label
             _ax.scatter(X_sc_pca[_mask, 0], X_sc_pca[_mask, 1], label=_label, color=_color, s=10, alpha=0.45, linewidths=0, rasterized=True)
         _ax.set_xlabel(f"PC1 ({pca_sc.explained_variance_ratio_[0]:.1%})")
         _ax.set_ylabel(f"PC2 ({pca_sc.explained_variance_ratio_[1]:.1%})")
         _ax.set_title(_title)
-        _ax.legend(fontsize=7, markerscale=2, frameon=True, loc="best")
+        add_categorical_legend(_ax, len(_unique_labels), markerscale=2)
 
     fig_pca_scatter.suptitle("Single-cell PCA", fontsize=13, fontweight="bold")
     fig_pca_scatter.tight_layout()
-    fig_pca_scatter.savefig(FIGS_DIR / "sc_pca_scatter.png", dpi=150, bbox_inches="tight")
+    _pca_scatter_path = FIGS_DIR / "sc_pca_scatter.png"
+    _pca_scatter_status = save_figure_protected(
+        fig_pca_scatter, _pca_scatter_path,
+        overwrite=CONFIG.overwrite_existing_outputs, dpi=150, bbox_inches="tight",
+    )
     plt.close(fig_pca_scatter)
-    print("✓ Saved: sc_pca_scatter.png")
+    print(f"✓ PCA scatter figure {_pca_scatter_status}: {_pca_scatter_path}")
     fig_pca_scatter
     return
 
 
 @app.cell
-def _(RESOLVED_CONFIG, X_sc_pca, df_sampled, silhouette_score):
+def _(RESOLVED_CONFIG, X_sc_pca, df_sampled, print, silhouette_score):
     _plate_labels = df_sampled[RESOLVED_CONFIG.plate_col]
     _treatment_labels = df_sampled[RESOLVED_CONFIG.treatment_col]
     _n_plates = _plate_labels.nunique(dropna=False)
@@ -532,15 +612,16 @@ def _(RESOLVED_CONFIG, X_sc_pca, df_sampled, silhouette_score):
 
 
 @app.cell
-def _(RESOLVED_CONFIG, UMAP_OK, X_sc_pca, df_sampled, umap):
+def _(RANDOM_STATE, RESOLVED_CONFIG, UMAP_OK, X_sc_pca, df_sampled, pd, print, umap):
     if UMAP_OK:
-        umap_model = umap.UMAP(n_neighbors=30, min_dist=0.25, metric="euclidean", n_components=2, random_state=42, transform_seed=42, low_memory=True)
+        _umap_neighbors = min(30, max(2, len(df_sampled) - 1))
+        umap_model = umap.UMAP(n_neighbors=_umap_neighbors, min_dist=0.25, metric="euclidean", n_components=2, random_state=RANDOM_STATE, transform_seed=RANDOM_STATE, low_memory=True)
         X_sc_umap = umap_model.fit_transform(X_sc_pca)
         umap_df = df_sampled.reset_index(drop=True).copy()
         umap_df["UMAP1"] = X_sc_umap[:, 0]
         umap_df["UMAP2"] = X_sc_umap[:, 1]
         if RESOLVED_CONFIG.has_dose_axis:
-            umap_df[RESOLVED_CONFIG.concentration_col] = __import__("pandas").to_numeric(
+            umap_df[RESOLVED_CONFIG.concentration_col] = pd.to_numeric(
                 umap_df[RESOLVED_CONFIG.concentration_col], errors="coerce"
             )
         print(f"  UMAP coordinates: {X_sc_umap.shape}")
@@ -551,19 +632,19 @@ def _(RESOLVED_CONFIG, UMAP_OK, X_sc_pca, df_sampled, umap):
 
 
 @app.cell
-def _(FIGS_DIR, RESOLVED_CONFIG, UMAP_OK, plt, sns, umap_df):
+def _(CONFIG, FIGS_DIR, RESOLVED_CONFIG, UMAP_OK, add_categorical_legend, categorical_palette, plt, print, save_figure_protected, sns, umap_df):
     if UMAP_OK:
         fig_umap, axes_umap = plt.subplots(1, 2 + int(RESOLVED_CONFIG.has_dose_axis), figsize=(20 if RESOLVED_CONFIG.has_dose_axis else 14, 5.5))
 
         for _ax, _col, _title in [(axes_umap[0], RESOLVED_CONFIG.treatment_col, "Treatment"), (axes_umap[1], RESOLVED_CONFIG.plate_col, "Plate — batch check")]:
             _values = umap_df[_col].astype(str)
             _levels = sorted(_values.dropna().unique())
-            _palette = sns.color_palette("tab10", len(_levels))
+            _palette = categorical_palette(len(_levels))
             for _level, _color in zip(_levels, _palette):
                 _mask = _values.eq(_level).to_numpy()
                 _ax.scatter(umap_df.loc[_mask, "UMAP1"], umap_df.loc[_mask, "UMAP2"], label=_level, color=_color, s=7, alpha=0.45, linewidths=0, rasterized=True)
             _ax.set_title(_title)
-            _ax.legend(fontsize=7, markerscale=2.5, frameon=True)
+            add_categorical_legend(_ax, len(_levels), markerscale=2.5)
 
         if RESOLVED_CONFIG.has_dose_axis:
             import pandas as _pd_umap
@@ -578,9 +659,13 @@ def _(FIGS_DIR, RESOLVED_CONFIG, UMAP_OK, plt, sns, umap_df):
             _ax.set_ylabel("UMAP 2")
         fig_umap.suptitle("Single-cell UMAP — PCA input space", fontsize=15, fontweight="bold")
         fig_umap.tight_layout()
-        fig_umap.savefig(FIGS_DIR / "sc_umap_overview.png", dpi=200, bbox_inches="tight")
+        _umap_path = FIGS_DIR / "sc_umap_overview.png"
+        _umap_status = save_figure_protected(
+            fig_umap, _umap_path, overwrite=CONFIG.overwrite_existing_outputs,
+            dpi=200, bbox_inches="tight",
+        )
         plt.close(fig_umap)
-        print("✓ Saved: sc_umap_overview.png")
+        print(f"✓ UMAP overview {_umap_status}: {_umap_path}")
         _display = fig_umap
     else:
         _display = None
@@ -589,11 +674,16 @@ def _(FIGS_DIR, RESOLVED_CONFIG, UMAP_OK, plt, sns, umap_df):
 
 
 @app.cell
-def _(RESULTS_DIR, overwrite_input, umap_df, write_parquet_protected):
-    umap_export_status = write_parquet_protected(
-        umap_df, RESULTS_DIR / "single_cell_umap_coordinates.parquet", overwrite=bool(overwrite_input.value)
-    )
-    print(f"✓ UMAP coordinates {umap_export_status}")
+def _(RESULTS_DIR, UMAP_OK, overwrite_input, print, umap_df, write_parquet_protected):
+    if UMAP_OK:
+        _umap_path = RESULTS_DIR / "single_cell_umap_coordinates.parquet"
+        umap_export_status = write_parquet_protected(
+            umap_df, _umap_path, overwrite=bool(overwrite_input.value)
+        )
+        print(f"✓ UMAP coordinates {umap_export_status}: {_umap_path}")
+    else:
+        umap_export_status = "skipped"
+        print("  SKIP — UMAP coordinates were not written because UMAP is unavailable.")
     return
 
 
@@ -622,13 +712,23 @@ def _(
     hdbscan_min_cluster_size_input,
     hdbscan_min_samples_input,
     pd,
+    print,
     umap_df,
 ):
     if HDBSCAN_OK:
+        _min_cluster_size = min(
+            int(hdbscan_min_cluster_size_input.value), max(2, len(X_cluster) - 1)
+        )
+        _min_samples = min(int(hdbscan_min_samples_input.value), _min_cluster_size)
+        if _min_cluster_size != int(hdbscan_min_cluster_size_input.value):
+            print(
+                f"ℹ HDBSCAN min_cluster_size reduced to {_min_cluster_size} "
+                f"for {len(X_cluster)} sampled cells."
+            )
         hdbscan_labels = fit_hdbscan(
             X_cluster,
-            min_cluster_size=int(hdbscan_min_cluster_size_input.value),
-            min_samples=int(hdbscan_min_samples_input.value),
+            min_cluster_size=_min_cluster_size,
+            min_samples=_min_samples,
         )
         umap_df_clustered = umap_df.copy()
         umap_df_clustered["Cluster"] = hdbscan_labels
@@ -646,17 +746,23 @@ def _(
 
 
 @app.cell
-def _(FIGS_DIR, HDBSCAN_OK, plt, sns, umap_df_clustered):
-    if HDBSCAN_OK:
+def _(CONFIG, FIGS_DIR, HDBSCAN_OK, UMAP_OK, plt, print, save_figure_protected, sns, umap_df_clustered):
+    if HDBSCAN_OK and UMAP_OK:
         fig_hdb, ax_hdb = plt.subplots(figsize=(8, 7))
         sns.scatterplot(data=umap_df_clustered, x="UMAP1", y="UMAP2", hue="Cluster", palette="tab20", s=5, linewidth=0, ax=ax_hdb)
         ax_hdb.set_title("Single-cell states (HDBSCAN)")
         fig_hdb.tight_layout()
-        fig_hdb.savefig(FIGS_DIR / "sc_hdbscan_umap.png", dpi=150, bbox_inches="tight")
+        _hdb_path = FIGS_DIR / "sc_hdbscan_umap.png"
+        _hdb_status = save_figure_protected(
+            fig_hdb, _hdb_path, overwrite=CONFIG.overwrite_existing_outputs,
+            dpi=150, bbox_inches="tight",
+        )
         plt.close(fig_hdb)
-        print("✓ Saved: sc_hdbscan_umap.png")
+        print(f"✓ HDBSCAN figure {_hdb_status}: {_hdb_path}")
         _display = fig_hdb
     else:
+        if HDBSCAN_OK and not UMAP_OK:
+            print("  SKIP — HDBSCAN UMAP figure: UMAP coordinates are unavailable.")
         _display = None
     _display
     return
@@ -665,22 +771,46 @@ def _(FIGS_DIR, HDBSCAN_OK, plt, sns, umap_df_clustered):
 @app.cell
 def _(
     FIGS_DIR,
+    CONFIG,
     KMeans,
+    RANDOM_STATE,
     X_cluster,
     kmeans_k_max_input,
     np,
     plt,
+    print,
+    save_figure_protected,
     silhouette_score,
 ):
-    k_range = range(2, int(kmeans_k_max_input.value) + 1)
+    _n_unique_points = len(np.unique(X_cluster, axis=0))
+    _max_supported_k = min(
+        int(kmeans_k_max_input.value), len(X_cluster) - 1, _n_unique_points
+    )
+    if _max_supported_k < 2:
+        raise ValueError(
+            "KMeans sweep requires at least two distinct sampled profiles; "
+            f"found {_n_unique_points}."
+        )
+    if _max_supported_k < int(kmeans_k_max_input.value):
+        print(
+            f"ℹ KMeans maximum k reduced from {int(kmeans_k_max_input.value)} to "
+            f"{_max_supported_k} based on sample size and distinct profiles."
+        )
+    k_range = range(2, _max_supported_k + 1)
     inertias_sc, silhouettes_sc = [], []
     for _k in k_range:
-        _km = KMeans(n_clusters=_k, random_state=42, n_init=10)
+        _km = KMeans(n_clusters=_k, random_state=RANDOM_STATE, n_init=10)
         _labels_k = _km.fit_predict(X_cluster)
         inertias_sc.append(_km.inertia_)
-        silhouettes_sc.append(
-            silhouette_score(X_cluster, _labels_k, sample_size=min(5000, len(_labels_k)), random_state=42)
-        )
+        _n_realized_clusters = len(np.unique(_labels_k))
+        if 2 <= _n_realized_clusters < len(_labels_k):
+            _silhouette = silhouette_score(
+                X_cluster, _labels_k,
+                sample_size=min(5000, len(_labels_k)), random_state=RANDOM_STATE,
+            )
+        else:
+            _silhouette = float("nan")
+        silhouettes_sc.append(_silhouette)
 
     fig_elbow, axes_elbow = plt.subplots(1, 2, figsize=(12, 4))
     axes_elbow[0].plot(list(k_range), inertias_sc, "o-", color="#1976d2")
@@ -693,10 +823,19 @@ def _(
     axes_elbow[1].set_title("Silhouette")
     fig_elbow.suptitle("Single-cell KMeans — choosing k", fontsize=12, fontweight="bold")
     fig_elbow.tight_layout()
-    fig_elbow.savefig(FIGS_DIR / "sc_kmeans_elbow.png", dpi=150, bbox_inches="tight")
+    _elbow_path = FIGS_DIR / "sc_kmeans_elbow.png"
+    _elbow_status = save_figure_protected(
+        fig_elbow, _elbow_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=150, bbox_inches="tight",
+    )
     plt.close(fig_elbow)
-    best_k_sc = list(k_range)[int(np.argmax(silhouettes_sc))]
-    print(f"  Best silhouette at k={best_k_sc}: {max(silhouettes_sc):.3f}")
+    _finite_silhouettes = np.isfinite(silhouettes_sc)
+    if not _finite_silhouettes.any():
+        raise ValueError("KMeans sweep produced no valid silhouette score.")
+    _best_position = int(np.nanargmax(silhouettes_sc))
+    best_k_sc = list(k_range)[_best_position]
+    print(f"  Best silhouette at k={best_k_sc}: {silhouettes_sc[_best_position]:.3f}")
+    print(f"  ✓ KMeans diagnostic figure {_elbow_status}: {_elbow_path}")
     fig_elbow
     return (best_k_sc,)
 
@@ -704,19 +843,25 @@ def _(
 @app.cell
 def _(
     FIGS_DIR,
+    CONFIG,
     KMeans,
+    RANDOM_STATE,
     RESOLVED_CONFIG,
     UMAP_OK,
     X_cluster,
+    add_categorical_legend,
     best_k_sc,
+    categorical_palette,
     df_sampled,
     pd,
     plt,
+    print,
+    save_figure_protected,
     sns,
     umap,
 ):
     K_SC = best_k_sc
-    kmeans_sc = KMeans(n_clusters=K_SC, random_state=42, n_init=10)
+    kmeans_sc = KMeans(n_clusters=K_SC, random_state=RANDOM_STATE, n_init=10)
     sc_cluster_labels = kmeans_sc.fit_predict(X_cluster)
 
     df_clustered = df_sampled.copy()
@@ -726,34 +871,42 @@ def _(
     print(composition.to_string())
 
     if UMAP_OK:
-        reducer_sc = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42, n_jobs=1)
+        _cluster_umap_neighbors = min(15, max(2, len(X_cluster) - 1))
+        reducer_sc = umap.UMAP(
+            n_neighbors=_cluster_umap_neighbors, min_dist=0.1,
+            random_state=RANDOM_STATE, n_jobs=1,
+        )
         X_sc_umap_clusters = reducer_sc.fit_transform(X_cluster)
 
         fig_kmeans_umap, axes_kmeans_umap = plt.subplots(1, 2, figsize=(14, 5))
-        _palette = sns.color_palette("tab20", K_SC)
+        _palette = categorical_palette(K_SC)
         for _k in range(K_SC):
             _mask = sc_cluster_labels == _k
             axes_kmeans_umap[0].scatter(X_sc_umap_clusters[_mask, 0], X_sc_umap_clusters[_mask, 1], label=f"Cluster {_k}", color=_palette[_k], s=8, alpha=0.5, linewidths=0)
         axes_kmeans_umap[0].set_title(f"KMeans clusters (k={K_SC})")
-        axes_kmeans_umap[0].legend(fontsize=7, markerscale=2)
+        add_categorical_legend(axes_kmeans_umap[0], K_SC, markerscale=2)
 
         _treatments_list = df_clustered[RESOLVED_CONFIG.treatment_col].tolist()
         _unique_t = sorted(set(_treatments_list))
-        _palette_t = sns.color_palette("tab10", len(_unique_t))
+        _palette_t = categorical_palette(len(_unique_t))
         for _lbl, _col in zip(_unique_t, _palette_t):
             _mask = [t == _lbl for t in _treatments_list]
             axes_kmeans_umap[1].scatter(X_sc_umap_clusters[_mask, 0], X_sc_umap_clusters[_mask, 1], label=_lbl, color=_col, s=8, alpha=0.5, linewidths=0)
         axes_kmeans_umap[1].set_title("Treatment (true labels)")
-        axes_kmeans_umap[1].legend(fontsize=7, markerscale=2)
+        add_categorical_legend(axes_kmeans_umap[1], len(_unique_t), markerscale=2)
 
         for _ax in axes_kmeans_umap:
             _ax.set_xlabel("UMAP 1")
             _ax.set_ylabel("UMAP 2")
         fig_kmeans_umap.suptitle("Single-cell UMAP", fontsize=12, fontweight="bold")
         fig_kmeans_umap.tight_layout()
-        fig_kmeans_umap.savefig(FIGS_DIR / "sc_umap_clusters.png", dpi=150, bbox_inches="tight")
+        _clusters_path = FIGS_DIR / "sc_umap_clusters.png"
+        _clusters_status = save_figure_protected(
+            fig_kmeans_umap, _clusters_path,
+            overwrite=CONFIG.overwrite_existing_outputs, dpi=150, bbox_inches="tight",
+        )
         plt.close(fig_kmeans_umap)
-        print("  ✓  Saved: sc_umap_clusters.png")
+        print(f"  ✓ KMeans UMAP figure {_clusters_status}: {_clusters_path}")
         _display = fig_kmeans_umap
     else:
         _display = None
@@ -781,7 +934,10 @@ def _(
     X_sampled,
     df_clustered,
     feature_cols_model,
+    overwrite_input,
+    print,
     train_lgbm_classifier_with_shap,
+    write_csv_protected,
 ):
     lgbm_result = train_lgbm_classifier_with_shap(
         X_sampled,
@@ -791,23 +947,31 @@ def _(
     )
 
     if "message" in lgbm_result:
-        print(f"  ⚠️  {lgbm_result['message']}")
+        print(f"  SKIP — {lgbm_result['message']}")
     else:
-        lgbm_result["classification_report"].to_csv(CLF_REPORT_CSV)
-        print(f"✓ Classification report saved: {CLF_REPORT_CSV.name}")
+        _classification_report = lgbm_result["classification_report"].rename_axis("label").reset_index()
+        _report_status = write_csv_protected(
+            _classification_report, CLF_REPORT_CSV,
+            overwrite=bool(overwrite_input.value),
+        )
+        print(f"✓ Classification report {_report_status}: {CLF_REPORT_CSV}")
         print(f"  Train wells: {len(lgbm_result['train_wells'])}  Test wells: {len(lgbm_result['test_wells'])}")
         print(f"  Well overlap between train/test: {len(lgbm_result['train_wells'] & lgbm_result['test_wells'])}")
 
         if "mean_abs_shap" in lgbm_result:
-            lgbm_result["mean_abs_shap"].to_csv(SHAP_SUMMARY_CSV)
-            print(f"✓ SHAP summary saved: {SHAP_SUMMARY_CSV.name}")
+            _shap_summary = lgbm_result["mean_abs_shap"].rename("mean_abs_shap").rename_axis("feature").reset_index()
+            _shap_status = write_csv_protected(
+                _shap_summary, SHAP_SUMMARY_CSV,
+                overwrite=bool(overwrite_input.value),
+            )
+            print(f"✓ SHAP summary {_shap_status}: {SHAP_SUMMARY_CSV}")
         elif "shap_message" in lgbm_result:
             print(f"  ⚠️  {lgbm_result['shap_message']}")
     return (lgbm_result,)
 
 
 @app.cell
-def _(FIGS_DIR, lgbm_result, plt):
+def _(CONFIG, FIGS_DIR, lgbm_result, plt, print, save_figure_protected):
     if "mean_abs_shap" in lgbm_result:
         _top30 = lgbm_result["mean_abs_shap"].head(30)
         fig_shap, ax_shap = plt.subplots(figsize=(8, 10))
@@ -816,9 +980,13 @@ def _(FIGS_DIR, lgbm_result, plt):
         ax_shap.set_title("SHAP feature importance (top 30, mean across classes)")
         ax_shap.tick_params(axis="y", labelsize=8)
         fig_shap.tight_layout()
-        fig_shap.savefig(FIGS_DIR / "shap_importance.png", dpi=150, bbox_inches="tight")
+        _shap_path = FIGS_DIR / "shap_importance.png"
+        _shap_status = save_figure_protected(
+            fig_shap, _shap_path, overwrite=CONFIG.overwrite_existing_outputs,
+            dpi=150, bbox_inches="tight",
+        )
         plt.close(fig_shap)
-        print("  ✓  Saved: shap_importance.png")
+        print(f"  ✓ SHAP figure {_shap_status}: {_shap_path}")
         _display = fig_shap
     else:
         _display = None
@@ -831,18 +999,24 @@ def _(mo):
     mo.md(r"""
     ## 8 — SC-17: SHAP vs. LDA loadings cross-check
 
-    If the top SHAP features and top LDA loadings agree, this is
-    convergent evidence that the morphological signal is real and not an
-    artefact of the supervised method.
+    If a compatible feature-level LDA loading table is available, overlap
+    with SHAP provides exploratory cross-method convergence. It does not prove
+    that a phenotype is biologically real: both methods use treatment labels
+    and can share the same confounders. This check is optional and `SKIP` is a
+    valid outcome.
     """)
     return
 
 
 @app.cell
-def _(FIGS_DIR, LDA_LOADINGS_CSV, lgbm_result, pd, plt):
+def _(CONFIG, FIGS_DIR, LDA_LOADINGS_CSV, lgbm_result, pd, plt, print, save_figure_protected):
     print("── SC-17: SHAP vs. LDA loadings cross-check ──")
     if "mean_abs_shap" not in lgbm_result or not LDA_LOADINGS_CSV.exists():
-        print("  ⚠️  SHAP summary or LDA loadings not available. Run NB04 and Section 7 above first.")
+        print(
+            "  SKIP — SHAP importance or a compatible feature-level LDA loading table is unavailable. "
+            "The standard NB04 PCA-space LDA coefficients are not directly comparable to raw "
+            "CellProfiler feature SHAP values."
+        )
         _display = None
     else:
         lda_df_sc = pd.read_csv(LDA_LOADINGS_CSV, index_col=0)
@@ -865,9 +1039,13 @@ def _(FIGS_DIR, LDA_LOADINGS_CSV, lgbm_result, pd, plt):
         ax_sc17.set_title("SC-17: SHAP vs. LDA loadings overlap (top 20 features)")
         ax_sc17.legend(fontsize=9)
         fig_sc17.tight_layout()
-        fig_sc17.savefig(FIGS_DIR / "sc17_shap_lda_overlap.png", dpi=150, bbox_inches="tight")
+        _sc17_path = FIGS_DIR / "sc17_shap_lda_overlap.png"
+        _sc17_status = save_figure_protected(
+            fig_sc17, _sc17_path, overwrite=CONFIG.overwrite_existing_outputs,
+            dpi=150, bbox_inches="tight",
+        )
         plt.close(fig_sc17)
-        print("  ✓  Saved: sc17_shap_lda_overlap.png")
+        print(f"  ✓ SC-17 figure {_sc17_status}: {_sc17_path}")
         _display = fig_sc17
     _display
     return
@@ -883,21 +1061,27 @@ def _(mo):
 
 @app.cell
 def _(
+    CLF_REPORT_CSV,
     CONFIG,
     EXPERIMENT_ID,
+    INPUT_PARQUET,
     K_SC,
+    RANDOM_STATE,
     REPO_ROOT,
     RESULTS_DIR,
+    SHAP_SUMMARY_CSV,
     df_clustered,
     df_sc,
     df_sc_clean,
     feature_cols_model,
     json,
     platform,
+    print,
     save_history_input,
     subprocess,
 ):
     from datetime import datetime, timezone
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
 
     def _run_git(args, root):
         try:
@@ -916,13 +1100,19 @@ def _(
     print(f"  KMeans k              : {K_SC}")
 
     provenance_nb06 = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pipeline": {
             "notebook": "06_single_cell_analysis.py",
             "experiment_id": EXPERIMENT_ID,
             "executed_at_utc": datetime.now(timezone.utc).isoformat(),
         },
-        "configuration": {"channels": CONFIG.channels},
+        "configuration": {
+            "channels": CONFIG.channels,
+            "random_state": RANDOM_STATE,
+            "analysis_mode": CONFIG.analysis_mode,
+            "included_plates": CONFIG.included_plates,
+            "overwrite_existing_outputs": CONFIG.overwrite_existing_outputs,
+        },
         "dataset": {
             "n_cells_loaded": int(df_sc.shape[0]),
             "n_cells_after_outlier_removal": int(df_sc_clean.shape[0]),
@@ -933,22 +1123,36 @@ def _(
         "version_control": {"git_commit": _run_git(["rev-parse", "HEAD"], REPO_ROOT) or "unknown"},
         "environment": {"python_version": platform.python_version()},
     }
+    provenance_nb06 = canonicalize_provenance(
+        provenance_nb06,
+        notebook="06_single_cell_analysis.py",
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=[
+            RESULTS_DIR / "single_cell_umap_coordinates.parquet",
+            CLF_REPORT_CSV,
+            SHAP_SUMMARY_CSV,
+        ],
+    )
     provenance_nb06_path = RESULTS_DIR / "provenance_nb06.json"
-    with provenance_nb06_path.open("w", encoding="utf-8") as _f:
-        json.dump(provenance_nb06, _f, indent=2, ensure_ascii=False)
-    print(f"✓ Provenance saved: {provenance_nb06_path}")
+    _provenance_payload = provenance_json(provenance_nb06)
+    if provenance_nb06_path.exists() and not CONFIG.overwrite_existing_outputs:
+        _provenance_status = "unchanged (existing provenance protected)"
+    else:
+        _provenance_status = "replaced" if provenance_nb06_path.exists() else "created"
+        provenance_nb06_path.write_text(_provenance_payload, encoding="utf-8")
+    print(f"✓ Provenance {_provenance_status}: {provenance_nb06_path}")
+    print(f"  Schema v{provenance_nb06['schema_version']} · input SHA-256 recorded: {provenance_nb06['dependencies'][0].get('sha256', 'unavailable')[:12]}…")
 
     if save_history_input.value:
-        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         _history_path = RESULTS_DIR / f"provenance_nb06_{_timestamp}.json"
-        if _history_path.exists():
-            raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
-        with _history_path.open("w", encoding="utf-8") as _f:
-            json.dump(provenance_nb06, _f, indent=2, ensure_ascii=False)
+        _history_path.write_text(_provenance_payload, encoding="utf-8")
         print(f"✓ Historical record: {_history_path}")
     else:
         print("  Historical record: disabled")
-    return
+    return (provenance_nb06_path,)
 
 
 @app.cell
@@ -963,47 +1167,82 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## 10 — Integrity check
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Required outputs are verified below. Outputs from optional branches are
+    required only when that branch actually ran.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
-    )
-    export_report_button
-    return (export_report_button,)
+def _(
+    CLF_REPORT_CSV,
+    FIGS_DIR,
+    RESULTS_DIR,
+    SHAP_SUMMARY_CSV,
+    UMAP_OK,
+    lgbm_result,
+    print,
+    provenance_nb06_path,
+):
+    _required_outputs = [
+        FIGS_DIR / "sc14_cell_count_violin.png",
+        FIGS_DIR / "sc_pca_scree.png",
+        FIGS_DIR / "sc_pca_scatter.png",
+        FIGS_DIR / "sc_kmeans_elbow.png",
+        provenance_nb06_path,
+    ]
+    if UMAP_OK:
+        _required_outputs.extend(
+            [
+                FIGS_DIR / "sc_umap_overview.png",
+                FIGS_DIR / "sc_umap_clusters.png",
+                RESULTS_DIR / "single_cell_umap_coordinates.parquet",
+            ]
+        )
+    if "classification_report" in lgbm_result:
+        _required_outputs.append(CLF_REPORT_CSV)
+    if "mean_abs_shap" in lgbm_result:
+        _required_outputs.extend([SHAP_SUMMARY_CSV, FIGS_DIR / "shap_importance.png"])
+
+    _missing_outputs = [path for path in _required_outputs if not path.exists()]
+    if _missing_outputs:
+        raise RuntimeError(
+            "NB06 integrity check failed — required outputs are missing: "
+            + ", ".join(str(path) for path in _missing_outputs)
+        )
+
+    print("═" * 65)
+    print("NB06 INTEGRITY CHECK PASSED")
+    print("═" * 65)
+    print(f"✓ Verified {len(_required_outputs)} required output(s)")
+    print("Optional SKIP results above do not count as failures.")
+    return
 
 
 @app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
+def _(mo):
+    mo.md(r"""
+    ## Save the analysis record
 
-    from hca_pipeline.report_export import export_notebook_pdf
+    Save the notebook's **current session** without rerunning cells. HTML
+    preserves rich outputs and expanded details; PDF provides a clean reading
+    copy without code. Chromium can save both directly to the experiment's
+    `reports/` folder after authorization. Safari provides separate downloads.
+    """)
+    return
 
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
 
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
+@app.cell
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
 
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_06_single_cell_analysis",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
+    )
+    mo.ui.anywidget(_report_saver)
     return
 
 

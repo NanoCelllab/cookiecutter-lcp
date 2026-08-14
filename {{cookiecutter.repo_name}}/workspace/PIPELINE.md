@@ -14,20 +14,17 @@ under each experiment's `analysis/legacy_ipynb/` for reference, not deleted.
 
 ## Pipeline Flow
 
-> **Deferred design:** a future dedicated cell-count confounder QC module,
-> positioned between NB02 and the quality-metrics gate, is specified in
-> [FUTURE_CELL_COUNT_CONFOUNDER_QC.md](FUTURE_CELL_COUNT_CONFOUNDER_QC.md).
-> It is not implemented and the current pipeline does not exclude wells by
-> cell count.
-
 ```
-(NB00) → NB01 → NB02 → NB03 → NB04 → NB05 → NB06
-          image     ↑
-          QC gate    Go/No-Go gate
+NB01 → NB02 → NB03 → NB04 → NB05 → NB06
+                ↑
+           Go/No-Go gate
+
+Optional cell-count review:
+NB04 → extras/cell_count_confounder_qc.py → NB03 → NB04 → NB05 → NB06
 ```
 
-QC gates (NB00, NB03) have protocol-defined, objective pass/fail criteria and
-are safe to run headlessly (`pixi run python3 <path>` — see
+NB03 has protocol-defined, objective pass/fail criteria and is safe to run
+headlessly (`pixi run python3 <path>` — see
 [Marimo Notebooks](#marimo-notebooks)). NB04–NB06 involve judgment calls
 (interpreting a UMAP, choosing a modelling space, evaluating a cluster) and
 are meant to be run interactively (`pixi run marimo edit <path>`), with a
@@ -36,15 +33,28 @@ of those notebooks as a substitute for actually reviewing them.
 
 | Step | Notebook | Input | Output | What it does |
 |------|----------|-------|--------|-------------|
-| 0 of 6 (optional) | `00_image_quality.py` | Raw images under `images/{EXPERIMENT_ID}/` | `results/image_quality/excluded_sites.csv`, per-image/per-well QC CSVs, figures | Per-image blur/saturation/SNR/focus metrics, human-tunable thresholds, flags debris/out-of-focus/over- or under-exposed sites for exclusion before aggregation. Self-skips if `image_root` isn't configured for this experiment. |
-| 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional `excluded_sites.csv` (from NB00) | `single_cell_profiles.parquet` | Read/consolidate all discovered plates, apply NB00's image-QC exclusions if present, select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
+| 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional `excluded_sites.csv` (from image-quality extra) | `single_cell_profiles.parquet` | Read/consolidate all discovered plates, apply image-quality extra's image-QC exclusions if present, select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
 | 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
 | 3 of 6 | `03_quality_metrics.py` | `per_well_features_selected.parquet` | `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png` | Percent Replicating, mAP, batch assessment, dose-response, Go/No-Go decision (SC-18→SC-22) — runs **before** biological interpretation, so profiling/fingerprints/single-cell analysis only happen on data that already cleared the replicate-signal bar |
 | 4 of 6 | `04_phenotypic_profiling.py` | `per_well_features_selected.parquet` | LDA/PCA/UMAP figures, models, CSVs | PCA, UMAP, LDA with leave-one-plate-out CV, Cohen's d, KMeans clustering, uncorrected-vs-Harmony comparison (SC-11→SC-13) |
 | 5 of 6 | `05_phenotypic_fingerprints.py` | `per_well_features_selected.parquet` | `results/phenotypic_fingerprints/*`, `figures/phenotypic_fingerprints/*` | Feature taxonomy, per-condition Cohen's d fingerprints, heatmaps/radar plots — dose-optional |
 | 6 of 6 | `06_single_cell_analysis.py` | `single_cell_ready.parquet` (NB02 cache) | SHAP CSVs, classification report, single-cell figures | Single-cell PCA/UMAP, HDBSCAN + KMeans clustering, LightGBM + SHAP, Mahalanobis distance (SC-14→SC-17) |
 
-**Optional, experiment-specific extension:** `07_recovery_axis_analysis.py`
+### Project-specific extras
+
+These notebooks live under `analysis/extras/` and are copied separately from
+the general NB01–NB06 sequence:
+
+- `extras/image_quality.py` performs raw-image blur, saturation, SNR and focus
+  QC when raw microscopy images are available. Run it before NB01 if the
+  project needs image-level exclusions; otherwise ignore it.
+- `extras/cell_count_confounder_qc.py` is opened only when NB04 flags a
+  plausible cell-count association. It diagnoses global and within-control
+  associations and requires an explicit reviewed decision before producing an
+  immutable derived checkpoint. If activated, restart at NB03; NB03–NB06 then
+  resolve the same per-well/single-cell checkpoint through
+  `profiles/{EXPERIMENT_ID}/active_profile_checkpoint.json`.
+- `extras/recovery_axis_analysis.py`
 computes a geometric "recovery axis" between two named reference states
 (e.g. a dormancy baseline and a proliferative/recovered state). It is **not**
 part of the required 01→06 sequence — it only applies to datasets built
@@ -115,28 +125,28 @@ cell), not a `.ipynb`. This matters for how you work with them:
   by a *different* cell, it must not start with `_`, or `marimo check --fix`
   will silently drop it from that cell's exports.
 
-### Exporting a PDF report
+### Saving an HTML + PDF analysis record
 
-Use `pixi run export-report <path-to-notebook.py> -o <report.pdf>` — **not**
-`marimo export pdf`. Both go through the same nbconvert-generated HTML, but
-`marimo export pdf` hands it to Playwright with no page numbers and no fix
-for nbconvert's `lab` template clipping (not wrapping) any source line wider
-than the code box, which loses the tail end of longer lines silently.
-`export-report` (`workspace/hca_pipeline/report_export.py`) drives
-Playwright itself to add both: a page-number footer and a CSS override that
-wraps long lines instead of clipping them. Pass `--no-code` to omit source
-and keep only markdown/outputs, and `--title` to change the header text
-(defaults to the notebook's filename).
+Every pipeline notebook ends with one **"Save report (HTML + PDF)"** control.
+It captures the outputs and widget state currently rendered in the browser;
+it does not execute notebook cells or start a second kernel. One click writes
+a timestamp-matched pair under `analysis/{EXPERIMENT_ID}/reports/`:
 
-Every pipeline notebook (NB00–NB07) also has an **"Export this notebook as a
-PDF report" button** as its last cell, so you don't need the CLI at all
-during a normal `marimo edit` session — click it and the PDF is written to
-`analysis/{EXPERIMENT_ID}/reports/`. Clicking it re-runs the whole notebook
-headlessly in a separate process to render it, so the report reflects
-whatever is currently saved in `experiment_config.json`, not unsaved widget
-changes you haven't let the notebook re-run with yet. (`demo_nanoparticle_showcase.py`
-is the one exception — it's explicitly stateless and writes nothing to disk,
-so it doesn't get this button.)
+```text
+04_phenotypic_profiling_20260814T153000Z.html
+04_phenotypic_profiling_20260814T153000Z.pdf
+```
+
+The HTML is the complete session record. The PDF is printed from that exact
+HTML file, with page numbers and print CSS that opens disclosure sections,
+removes scroll/max-height clipping, wraps long lines and fits tables/images to
+the page. Interactive controls are necessarily static in PDF but remain
+represented in HTML.
+
+`pixi run export-report <notebook.py> -o <report.pdf>` remains available as a
+legacy/headless option. Unlike the in-notebook control, the CLI deliberately
+executes the notebook in a fresh process and should only be used when a clean
+reproducible rerun is desired.
 
 ### New content style: explain-the-why + basic/advanced options
 
@@ -238,9 +248,9 @@ message) rather than assuming every dataset has that dimension.
 `image_root` follows the same optional-field pattern: it's `None` unless set
 via NB01's config wizard, in which case it should point at the experiment's
 raw-image directory relative to the repo root (e.g.
-`images/{EXPERIMENT_ID}/images`). `00_image_quality.py` self-skips with a
+`images/{EXPERIMENT_ID}/images`). `extras/image_quality.py` self-skips with a
 clear message when it's unset, and NB01 only applies an image-QC exclusion
-list when `00_image_quality.py` has actually produced one.
+list when `extras/image_quality.py` has actually produced one.
 
 ## Shared Pipeline Library
 
@@ -260,9 +270,11 @@ file) imported by every notebook:
 | `modelling.py` | Reusable PCA/UMAP/LDA/KMeans "run one modelling space" runner, balanced sampling |
 | `single_cell.py` | Mahalanobis within-well outlier QC, single-cell feature curation, HDBSCAN helpers, LightGBM+SHAP classifier |
 | `plotting.py` | Generic heatmap/radar/scatter plotting helpers |
-| `image_qc.py` | Per-image quality-control toolkit — scan/aggregate/threshold raw microscopy images, used by `00_image_quality.py` |
+| `image_qc.py` | Per-image quality-control toolkit — scan/aggregate/threshold raw microscopy images, used by `extras/image_quality.py` |
+| `cell_count_qc.py` | Conservative cell-count evidence gate, audited well filtering and control-based residualization used by the optional advanced extra |
 | `schema.py` | Parquet schema consistency checks (duplicate-column detection, cross-file comparison) — see "Cross-experiment schema consistency" below |
-| `report_export.py` | Notebook → paginated PDF report rendering — see "Exporting a PDF report" above |
+| `report_export.py` | Live browser snapshot → timestamp-matched HTML/PDF analysis record, plus the legacy headless PDF CLI |
+| `provenance.py` | Shared schema-v2 provenance records, dependency/output hashes and validation |
 
 Import from the specific submodule you need
 (`from hca_pipeline.config import ExperimentConfig`), or from the top-level
@@ -328,35 +340,52 @@ recur across different students' submissions in different amounts; run
 │   │   ├── platemap/
 │   │   └── experiment_config.json     # dataset-agnostic config, created by NB01
 │   ├── backend/{EXPERIMENT_ID}/       # legacy single-cell CSV / SQLite databases (NB01 input)
-│   ├── images/{EXPERIMENT_ID}/        # raw microscopy images (NB00 input, if configured)
+│   ├── images/{EXPERIMENT_ID}/        # raw microscopy images (image-quality extra input, if configured)
 │   ├── analysis/{EXPERIMENT_ID}/
 │   │   ├── analysis/                  # the marimo notebooks themselves
+│   │   │   ├── 01_...py → 06_...py   # general pipeline
+│   │   │   ├── extras/                # project-specific optional notebooks
+│   │   │   │   ├── image_quality.py
+│   │   │   │   ├── cell_count_confounder_qc.py
+│   │   │   │   └── recovery_axis_analysis.py
 │   │   │   └── legacy_ipynb/          # superseded Jupyter versions, kept for reference
 │   │   ├── outputs/                   # NB01 output (single_cell_profiles.parquet)
 │   │   ├── results/
-│   │   │   ├── image_quality/         # optional NB00
+│   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── cv_summary.csv         # NB02
 │   │   │   ├── quality_metrics/       # NB03
 │   │   │   ├── lda_*.csv              # NB04
 │   │   │   ├── phenotypic_fingerprints/ # NB05
-│   │   │   └── recovery_axis/         # optional NB07
+│   │   │   └── recovery_axis/         # optional recovery-axis extra
 │   │   ├── figures/
-│   │   │   ├── image_quality/         # optional NB00
+│   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── sample_retrieval/      # NB01
 │   │   │   ├── aggregation/           # NB02
 │   │   │   ├── quality_metrics/       # NB03
 │   │   │   ├── phenotypic_profiling/  # NB04
 │   │   │   ├── phenotypic_fingerprints/ # NB05
 │   │   │   ├── single_cell/           # NB06
-│   │   │   └── recovery_axis/         # optional NB07
-│   │   └── reports/                   # `pixi run export-report` PDFs, one per notebook
+│   │   │   └── recovery_axis/         # optional recovery-axis extra
+│   │   └── reports/                   # timestamp-matched live-session HTML + PDF records
 │   ├── profiles/{EXPERIMENT_ID}/
 │   │   ├── outputs/
 │   │   │   ├── per_well_features_selected.parquet  # NB02 → NB03/NB04/NB05
-│   │   │   └── cache/                 # NB02's per-stage checkpoints
-│   │   │       └── single_cell_ready.parquet       # NB02 → NB06/NB07
+│   │   │   ├── single_cell_ready.parquet            # NB02 → NB06/recovery-axis extra
+│   │   │   └── cache/                 # NB02's internal per-stage checkpoints
 │   └── models/{EXPERIMENT_ID}/outputs/ # NB04 models (.pkl)
 ```
+
+## Provenance and reference tests
+
+Every core notebook writes a schema-v2 provenance JSON with consistent
+`pipeline`, `configuration`, `dataset`, `dependencies`, `version_control`,
+`environment`, `outputs`, and `analysis` blocks. Declared dependencies and
+outputs include existence, size, SHA-256 and source-notebook information.
+
+Run `pixi run test-pipeline` after changing shared statistics, provenance, or
+plotting utilities. The lightweight reference suite checks Cohen's d,
+permutation PERMANOVA/PERMDISP, phenotypic-consistency mAP, provenance hashes,
+and categorical palettes.
 
 ## Control Type Vocabulary
 
@@ -371,6 +400,14 @@ Both `con` and `negcon` are treated as negative controls for quality metrics.
 These are **defaults**, not fixed literals — each experiment's actual
 vocabulary (which labels mean negcon/poscon/trt for *this* platemap) lives in
 `experiment_config.json` and is editable via NB01's config wizard.
+
+NB03 validates positive controls and each candidate negative-control treatment
+explicitly. If candidate negative controls do not behave as one baseline, the
+user can select the valid treatment(s) as the active reference. The decision is
+saved to `workspace/metadata/{EXPERIMENT_ID}/control_reference_selection.json`;
+excluded candidates remain in the data for diagnosis instead of being silently
+deleted. NB04 and NB05 reuse that exact reference. To renormalize the profiles
+after changing the reference, rerun NB02 with checkpoint reuse disabled.
 
 ## Training Curriculum
 

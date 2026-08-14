@@ -14,10 +14,10 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 00 — Image Quality Gate
+    # Extra — Image Quality Gate
 
-    **Pipeline step:** 0 of 6 (optional)
-    **Position in pipeline:** raw images → **NB00 (image quality)** → NB01 (samples retrieval)
+    **Type:** project-specific optional preparation
+    **When to run:** before NB01, only when raw microscopy images are available
 
     **Input:** raw microscopy images under `CONFIG.image_root`
     **Output:** `results/image_quality/excluded_sites.csv` (consumed by NB01),
@@ -188,7 +188,7 @@ def _(CONFIG, EXPERIMENT_ID, REPO_ROOT):
         print(f"✓ Image QC enabled — scanning: {IMAGE_ROOT_PATH}")
     else:
         print(
-            "ℹ️  NB00 SKIPPED — CONFIG.image_root is not set for this experiment.\n"
+            "ℹ️  Image-quality extra skipped — CONFIG.image_root is not set for this experiment.\n"
             "   Set it via NB01's config wizard if raw images are available."
         )
     return FIGS_DIR, IMAGE_QC_ENABLED, IMAGE_ROOT_PATH, RESULTS_DIR
@@ -629,7 +629,7 @@ def _(
     _git_commit = _run_git_command(["rev-parse", "HEAD"])
 
     provenance = {
-        "notebook": "00_image_quality.py",
+        "notebook": "extras/image_quality.py",
         "experiment_id": EXPERIMENT_ID,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_hash": (_git_commit or "unknown")[:8],
@@ -671,7 +671,7 @@ def _(mo):
 @app.cell
 def _(EXPERIMENT_ID, IMAGE_QC_ENABLED, excluded_sites_csv, provenance):
     print("═" * 72)
-    print("NB00 COMPLETED")
+    print("IMAGE-QUALITY EXTRA COMPLETED")
     print("═" * 72)
     print(f"  Experiment:  {EXPERIMENT_ID}")
     if IMAGE_QC_ENABLED:

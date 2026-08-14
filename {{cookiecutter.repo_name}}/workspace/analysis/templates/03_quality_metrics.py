@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -21,9 +26,8 @@ def _(mo):
 
     This notebook is the pipeline's QC gate, deliberately placed *before*
     phenotypic profiling/fingerprints: it only needs NB02's output, and its
-    pass/fail criteria (PR/mAP thresholds below) are protocol-defined rather
-    than a judgment call, so it is safe to run headlessly
-    (`pixi run python3`) as well as interactively.
+    pass/fail criteria (PR/mAP thresholds below) are protocol-defined and shown
+    explicitly with the evidence supporting each decision.
 
     **Input:** `per_well_features_selected.parquet` (from NB02)
     **Outputs:** `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png`,
@@ -118,12 +122,12 @@ def _():
 
 
 @app.cell
-def _(Path):
+def _(Path, mo, print):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
     # workspace). __file__ is used instead of cwd so this notebook
     # behaves identically under `marimo edit`, a plain `python` run, or an
-    # automated headless run from any working directory.
+    # automated run from any working directory.
     import sys
 
     _notebook_path = Path(__file__).resolve()
@@ -163,7 +167,10 @@ def _(Path):
         run_treatment_vs_control,
     )
 
-    print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
+    mo.callout(
+        mo.md(f"### Shared utilities ready\n\n✅ Loaded `hca_pipeline` from `{_pipelines_dir}`."),
+        kind="success",
+    )
     return (
         ExperimentConfig,
         REPO_ROOT,
@@ -192,10 +199,9 @@ def _(mo):
 
     Pick the experiment folder; plate geometry, column names, and control
     vocabulary are pre-filled from the `experiment_config.json` saved by
-    earlier pipeline steps. QC-methodology thresholds (null percentile,
-    PR/batch/dose thresholds, `copairs` null sizes) are **not** part of
-    `ExperimentConfig` — they're this notebook's own analysis choices, set
-    as plain widgets below.
+    earlier pipeline steps. Only the experiment selector is shown initially;
+    output policy and QC-methodology thresholds are available under
+    **Advanced settings**. Effective values are summarized before analysis.
     """)
     return
 
@@ -237,7 +243,21 @@ def _(loaded_config, mo):
         value=loaded_config.save_provenance_history,
         label="Save timestamped provenance history",
     )
-    mo.vstack([overwrite_input, save_history_input])
+    output_settings = mo.accordion(
+        {
+            "Advanced settings · Output policy": mo.vstack(
+                [
+                    mo.md(
+                        "Change these only when intentionally replacing prior QC results or "
+                        "retaining timestamped provenance records."
+                    ),
+                    overwrite_input,
+                    save_history_input,
+                ]
+            )
+        }
+    )
+    output_settings
     return overwrite_input, save_history_input
 
 
@@ -247,6 +267,8 @@ def _(
     experiment_id_input,
     loaded_config,
     overwrite_input,
+    mo,
+    print,
     replace,
     save_history_input,
 ):
@@ -262,13 +284,26 @@ def _(
     )
     _config_path = RAW_CONFIG.save(REPO_ROOT)
 
-    print("═" * 72)
-    print("EXPERIMENT CONFIGURATION LOADED")
-    print("═" * 72)
-    print(f"  Experiment ID:       {EXPERIMENT_ID}")
-    print(f"  Repository root:     {REPO_ROOT}")
-    print(f"  Saved config:        {_config_path}")
-    return EXPERIMENT_ID, RAW_CONFIG
+    OVERWRITE_EXISTING_OUTPUTS = RAW_CONFIG.overwrite_existing_outputs
+    mo.callout(
+        mo.md(
+            f"""
+            ### Experiment configuration loaded
+
+            | Setting | Effective value |
+            |---|---|
+            | Experiment | `{EXPERIMENT_ID}` |
+            | Analysis mode | **{RAW_CONFIG.analysis_mode}** |
+            | Negative controls | {', '.join(f'`{v}`' for v in RAW_CONFIG.negcon_values) or 'not configured'} |
+            | Positive controls | {', '.join(f'`{v}`' for v in RAW_CONFIG.poscon_values) or 'not configured'} |
+            | Overwrite existing outputs | **{OVERWRITE_EXISTING_OUTPUTS}** |
+            | Timestamped provenance | **{RAW_CONFIG.save_provenance_history}** |
+            | Saved configuration | `{_config_path}` |
+            """
+        ),
+        kind="success",
+    )
+    return EXPERIMENT_ID, OVERWRITE_EXISTING_OUTPUTS, RAW_CONFIG
 
 
 @app.cell
@@ -279,7 +314,8 @@ def _(mo):
     These govern *how* the metrics below are computed and thresholded —
     they are properties of this analysis, not of the experiment itself,
     so they live as notebook widgets rather than in `ExperimentConfig`.
-    Defaults match the original notebook's hardcoded values.
+    Defaults implement the current pipeline protocol. Change them only when a
+    documented assay-specific rationale justifies a different decision rule.
     """)
     return
 
@@ -327,19 +363,30 @@ def _(mo):
         value=0.30, start=0.0, stop=1.0, step=0.01,
         label="Only flag a batch effect if within-plate PR exceeds this",
     )
-    mo.vstack([
-        null_percentile_input,
-        n_null_pairs_input,
-        null_size_input,
-        null_size_copairs_local_input,
-        random_state_input,
-        pr_fraction_threshold_input,
-        negcon_pr_threshold_input,
-        poscon_pr_threshold_input,
-        batch_drop_threshold_input,
-        min_reps_for_pr_input,
-        min_within_pr_for_flag_input,
-    ])
+    methodology_settings = mo.accordion(
+        {
+            "Advanced settings · QC methodology": mo.vstack(
+                [
+                    mo.md(
+                        "These thresholds change the QC decision itself. Record and justify "
+                        "any deviation from the defaults in the analysis report."
+                    ),
+                    null_percentile_input,
+                    n_null_pairs_input,
+                    null_size_input,
+                    null_size_copairs_local_input,
+                    random_state_input,
+                    pr_fraction_threshold_input,
+                    negcon_pr_threshold_input,
+                    poscon_pr_threshold_input,
+                    batch_drop_threshold_input,
+                    min_reps_for_pr_input,
+                    min_within_pr_for_flag_input,
+                ]
+            )
+        }
+    )
+    methodology_settings
     return (
         batch_drop_threshold_input,
         min_reps_for_pr_input,
@@ -368,6 +415,8 @@ def _(
     poscon_pr_threshold_input,
     pr_fraction_threshold_input,
     random_state_input,
+    mo,
+    print,
 ):
     NULL_PERCENTILE = float(null_percentile_input.value)
     N_NULL_PAIRS = int(n_null_pairs_input.value)
@@ -381,18 +430,26 @@ def _(
     MIN_REPS_FOR_PR = int(min_reps_for_pr_input.value)
     MIN_WITHIN_PR_FOR_FLAG = float(min_within_pr_for_flag_input.value)
 
-    print("QC-methodology parameters finalized:")
-    print(f"  Null percentile:              {NULL_PERCENTILE}")
-    print(f"  From-scratch null pairs:      {N_NULL_PAIRS}")
-    print(f"  copairs null size (global):   {NULL_SIZE}")
-    print(f"  copairs null size (per-plate):{NULL_SIZE_COPAIRS_LOCAL}")
-    print(f"  Random seed:                  {RANDOM_STATE}")
-    print(f"  PR fraction threshold:        {PR_FRACTION_THRESHOLD}")
-    print(f"  Negcon PR threshold (≤):      {NEGCON_PR_THRESHOLD}")
-    print(f"  Poscon PR threshold (>):      {POSCON_PR_THRESHOLD}")
-    print(f"  Batch drop threshold:         {BATCH_DROP_THRESHOLD}")
-    print(f"  Min reps per plate for PR:    {MIN_REPS_FOR_PR}")
-    print(f"  Min within-plate PR to flag:  {MIN_WITHIN_PR_FOR_FLAG}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### QC methodology finalized
+
+            | Parameter | Value |
+            |---|---:|
+            | Null percentile | {NULL_PERCENTILE:g} |
+            | From-scratch null pairs | {N_NULL_PAIRS:,} |
+            | copairs null size (global / local) | {NULL_SIZE:,} / {NULL_SIZE_COPAIRS_LOCAL:,} |
+            | Random seed | {RANDOM_STATE} |
+            | Minimum plate PR fraction | {PR_FRACTION_THRESHOLD:.2f} |
+            | Negative-control PR maximum | {NEGCON_PR_THRESHOLD:.2f} |
+            | Positive-control PR minimum | {POSCON_PR_THRESHOLD:.2f} |
+            | Cross-plate PR-drop warning | {BATCH_DROP_THRESHOLD:.2f} |
+            | Minimum replicates for stable PR | {MIN_REPS_FOR_PR} |
+            """
+        ),
+        kind="info",
+    )
     return (
         BATCH_DROP_THRESHOLD,
         MIN_REPS_FOR_PR,
@@ -409,7 +466,7 @@ def _(
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, mo, print):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
     PROFILES_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID
@@ -419,10 +476,18 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     FIGS_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Analysis directory:  {ANALYSIS_DIR}")
-    print(f"Profiles directory:  {PROFILES_DIR}")
-    print(f"Figures directory:   {FIGS_DIR}")
-    print(f"Results directory:   {RESULTS_DIR}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### QC paths ready
+
+            - NB02 profiles: `{PROFILES_DIR / 'outputs'}`
+            - Results: `{RESULTS_DIR}`
+            - Figures: `{FIGS_DIR}`
+            """
+        ),
+        kind="info",
+    )
     return FIGS_DIR, PROFILES_DIR, RESULTS_DIR
 
 
@@ -442,38 +507,26 @@ def _(mo):
 
 
 @app.cell
-def _(PROFILES_DIR, mo, pd):
+def _(PROFILES_DIR, mo, pd, print):
     _candidate_paths = [
         PROFILES_DIR / "outputs" / "per_well_features_selected.parquet",
         PROFILES_DIR / "outputs" / "per_well_features_selected_merged.parquet",
     ]
     INPUT_PATH = next((p for p in _candidate_paths if p.exists()), None)
     _checked_paths = "\n".join(f"- `{path}`" for path in _candidate_paths)
-    mo.stop(
-        INPUT_PATH is None,
-        mo.callout(
-            mo.md(
-                "**NB03 stopped before loading data.**\n\n"
-                "The feature-selected parquet produced by NB02 was not found. "
-                "This is a missing prerequisite, not a failure in the QC calculations.\n\n"
-                f"Paths checked:\n{_checked_paths}\n\n"
-                "Run `02_aggregate_normalize_featureselect.py` to completion, confirm "
-                "that its final integrity check passes, and then rerun this cell. "
-                "Downstream cells were intentionally stopped to avoid cascading errors."
-            ),
-            kind="warn",
-        ),
-    )
+    print("INPUT DISCOVERY")
+    for _path in _candidate_paths:
+        print(f"  {'✓ found' if _path.exists() else '— not found'}: {_path}")
+    mo.stop(INPUT_PATH is None, mo.callout(mo.md("**NB03 stopped:** the NB02 feature-selected parquet was not found.\n\n" f"Paths checked:\n{_checked_paths}\n\nRun NB02 to completion and rerun this cell. Downstream cells were stopped to avoid cascading errors."), kind="warn"))
 
-    print("✓ NB02 prerequisite located")
-    print(f"  Loading: {INPUT_PATH}")
+    print(f"Loading: {INPUT_PATH}")
     df = pd.read_parquet(INPUT_PATH)
-    print(f"  ✓ Loaded {df.shape[0]:,} wells × {df.shape[1]:,} columns")
-    return (df,)
+    print(f"Shape: {df.shape[0]} wells × {df.shape[1]} columns")
+    return INPUT_PATH, df
 
 
 @app.cell
-def _(RAW_CONFIG, df):
+def _(RAW_CONFIG, df, print):
     CONFIG = RAW_CONFIG.resolve_columns(df)
 
     print("=== Auto-Detection Results ===")
@@ -490,7 +543,7 @@ def _(RAW_CONFIG, df):
 
 
 @app.cell
-def _(CONFIG, df, infer_feature_cols):
+def _(CONFIG, df, infer_feature_cols, np, print):
     feat_cols = infer_feature_cols(df)
     if not feat_cols:
         raise ValueError("No feature columns were detected in df.")
@@ -498,10 +551,14 @@ def _(CONFIG, df, infer_feature_cols):
     print(f"Feature columns:  {len(feat_cols)} "
           f"(prefixes: {sorted({c.split('_')[0] for c in feat_cols})})")
 
-    if df[feat_cols].isna().to_numpy().any():
-        _nan_count = int(df[feat_cols].isna().sum().sum())
-        print(f"  Filling {_nan_count} NaN feature values with 0 (consistent with NB02)")
-        df[feat_cols] = df[feat_cols].fillna(0)
+    _feature_values = df[feat_cols].replace([np.inf, -np.inf], np.nan)
+    _nan_count = int(_feature_values.isna().sum().sum())
+    if _nan_count:
+        raise ValueError(
+            f"NB03 received {_nan_count:,} missing or infinite feature values. "
+            "NB02 should export a finite feature matrix; rerun or review NB02 instead "
+            "of silently replacing values with zero here."
+        )
 
     print(f"\n=== Experiment Summary ===")
     print(f"  Plates: {df[CONFIG.plate_col].nunique()}")
@@ -522,7 +579,73 @@ def _(CONFIG, df, infer_feature_cols):
 
 
 @app.cell
-def _(CONFIG, MIN_REPS_FOR_PR, df):
+def _(CONFIG, df, mo, pd, print):
+    control_inventory = (
+        df.groupby([CONFIG.control_type_col, CONFIG.treatment_col], dropna=False)
+        .size()
+        .reset_index(name="n_wells")
+        .sort_values([CONFIG.control_type_col, CONFIG.treatment_col])
+    )
+    _negcon_mask = df[CONFIG.control_type_col].isin(CONFIG.negcon_values)
+    _poscon_mask = df[CONFIG.control_type_col].isin(CONFIG.poscon_values)
+    n_negcon_wells = int(_negcon_mask.sum())
+    n_poscon_wells = int(_poscon_mask.sum())
+    print("CONTROL INVENTORY")
+    print(f"  Negative-control wells: {n_negcon_wells:,}")
+    print(f"  Positive-control wells: {n_poscon_wells:,}")
+    mo.stop(
+        n_negcon_wells == 0,
+        mo.callout(
+            mo.md(
+                "**No configured negative-control wells were found.**\n\n"
+                "Activity mAP and Cohen's d require a negative-control reference. "
+                "Review the control vocabulary and platemap metadata before continuing."
+            ),
+            kind="danger",
+        ),
+    )
+    if n_poscon_wells == 0:
+        print(
+            "  ⚠ No configured positive-control wells were found. QC will continue so the "
+            "missing evidence is recorded as an explicit critical FAIL."
+        )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### Control inventory
+
+                Negative controls define the activity reference and are required
+                to continue. Positive controls validate that the assay can produce
+                a detectable phenotype; if absent, the notebook continues only to
+                record that missing evidence as a critical QC failure.
+                """
+            ),
+            control_inventory,
+        ]
+    )
+    return control_inventory, n_negcon_wells, n_poscon_wells
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### SC-18 — Profile integrity and replication readiness
+
+    **What it evaluates:** whether NB02 supplied one finite profile per well,
+    complete grouping metadata, and enough replicates for stable PR estimates.
+
+    Duplicate wells or missing treatment/control labels are **blocking** because
+    they invalidate pair definitions. Low replicate counts are **advisory**:
+    metrics can still be computed, but their uncertainty is higher. PASS here
+    confirms structural readiness only; it does not mean the controls worked or
+    that treatments produced a phenotype.
+    """)
+    return
+
+
+@app.cell
+def _(CONFIG, MIN_REPS_FOR_PR, df, mo, print):
     reps_per_plate = df.groupby([CONFIG.plate_col, CONFIG.treatment_col]).size()
     reps_total = df.groupby(CONFIG.treatment_col).size()
 
@@ -545,20 +668,32 @@ def _(CONFIG, MIN_REPS_FOR_PR, df):
     else:
         print("  All treatments have ≥ 10 total replicates ✓")
 
-    # SC-18: data-integrity sanity check (blocking is intentionally not raised
-    # here — this mirrors the source notebook's report-only SC-18).
     sc18_checks = [
-        ("Metadata columns present", CONFIG.plate_col is not None and CONFIG.treatment_col is not None),
-        ("No empty treatments", not df[CONFIG.treatment_col].isna().any()),
+        ("Dataset contains at least one well profile", not df.empty),
+        (
+            "Exactly one profile per plate/well",
+            not df.duplicated([CONFIG.plate_col, CONFIG.well_col]).any(),
+        ),
+        ("No empty treatment labels", not df[CONFIG.treatment_col].isna().any()),
+        ("No empty control-type labels", not df[CONFIG.control_type_col].isna().any()),
     ]
-    print("\n=== SC-18: Data Integrity ===")
-    sc18_pass = True
+    print("\n=== SC-18: Profile integrity and replication readiness ===")
     for _name, _passed in sc18_checks:
-        if not _passed:
-            sc18_pass = False
         print(f"  [{'PASS' if _passed else 'FAIL'}] {_name}")
-    print(f"  SC-18 overall: {'PASS' if sc18_pass else 'FAIL'}")
-    return
+    sc18_pass = all(_passed for _, _passed in sc18_checks)
+    sc18_status = "PASS" if sc18_pass else "FAIL"
+    print(f"  SC-18 overall: {sc18_status}")
+    mo.stop(
+        not sc18_pass,
+        mo.callout(
+            mo.md(
+                "**SC-18 failed: the profile table is not structurally valid for QC.**\n\n"
+                "Review duplicate plate/well rows and missing treatment/control metadata in NB02."
+            ),
+            kind="danger",
+        ),
+    )
+    return low_rep_plates, low_rep_total, sc18_checks, sc18_status
 
 
 @app.cell
@@ -607,6 +742,7 @@ def _(
     crossvalidate_scratch_vs_copairs_map,
     df,
     feat_cols,
+    print,
 ):
     crossval_result = crossvalidate_scratch_vs_copairs_map(
         df, feat_cols, CONFIG.treatment_col, null_size=NULL_SIZE, seed=RANDOM_STATE,
@@ -651,6 +787,14 @@ def _(mo):
     **phenotypic-consistency mAP (PC mAP)**
     (from-scratch + copairs, cross-validated). **SC-19**: negcon PR ≤
     threshold, poscon PR > threshold.
+
+    **How to read SC-19:** PASS requires both control classes to be present on
+    every plate and to satisfy their configured consistency rules. Missing
+    negative or positive controls produce FAIL rather than an automatic pass.
+    A failure is critical: inspect the platemap/control vocabulary and control
+    wells before interpreting treatment phenotypes. SC-19 evaluates replicate
+    consistency, not activity relative to control; positive-control activity is
+    evaluated separately in SC-22.
     """)
     return
 
@@ -667,6 +811,7 @@ def _(
     RANDOM_STATE,
     df,
     feat_cols,
+    print,
     run_per_plate_qc,
 ):
     qc_result = run_per_plate_qc(
@@ -683,22 +828,45 @@ def _(
     print(qc_result["qc_flags"].to_string(index=False))
     print("\n--- SC-19 Status ---")
     print(qc_result["sc19_status"].to_string(index=False))
+    _missing_control_evidence = qc_result["sc19_status"][
+        ~qc_result["sc19_status"]["negcon_available"]
+        | ~qc_result["sc19_status"]["poscon_available"]
+    ]
+    if not _missing_control_evidence.empty:
+        print("\nSC-19 FAIL — one or more plates lack evaluable negative- or positive-control profiles")
     print("\n--- Percent Matching (PM), per plate ---")
     print(qc_result["pm_results"].to_string(index=False))
     print("\n--- Per-plate PR ---")
     print(qc_result["pr_results"][[CONFIG.plate_col, "treatment", "control_type",
         "median_corr", "null_threshold", "passes_pr"]].to_string(index=False))
     print("\n--- Phenotypic-consistency mAP (PC mAP) Cross-Validation ---")
-    print(qc_result["map_results"][[CONFIG.plate_col, "treatment",
-        "mAP_from_scratch", "mAP_copairs", "mAP_diff"]].to_string(index=False))
+    print(
+        qc_result["map_results"][
+            [CONFIG.plate_col, "treatment", "mAP_from_scratch", "mAP_copairs", "mAP_diff"]
+        ]
+        .rename(
+            columns={
+                "mAP_from_scratch": "PC_mAP_from_scratch",
+                "mAP_copairs": "PC_mAP_copairs",
+                "mAP_diff": "PC_mAP_difference",
+            }
+        )
+        .to_string(index=False)
+    )
     return (qc_result,)
 
 
 @app.cell
-def _(CONFIG, FIGS_DIR, plot_per_plate_qc, qc_result):
+def _(CONFIG, FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, plot_per_plate_qc, print, qc_result):
     _output_path = FIGS_DIR / "app_a_per_plate_qc.png"
-    _figure = plot_per_plate_qc(qc_result, CONFIG.plate_col, output_path=str(_output_path))
-    print(f"✓ Application A figure saved: {_output_path}")
+    _existed = _output_path.exists()
+    _write_path = None if _existed and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_per_plate_qc(qc_result, CONFIG.plate_col, output_path=_write_path)
+    print(
+        f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure {'replaced' if _existed else 'created'} and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -717,6 +885,12 @@ def _(mo):
     Here, both within- and cross-plate mAP are **PC mAP**: positives are the
     same treatment, with the cross-plate calculation requiring positives to
     come from different plates.
+
+    **How to read SC-20:** SKIP is the correct result for a single plate, not a
+    failure. With multiple plates, WARN means cross-plate consistency drops
+    beyond the configured limit for otherwise reproducible treatments. This is
+    evidence of technical plate structure, not proof that biological effects
+    are absent.
     """)
     return
 
@@ -732,6 +906,7 @@ def _(
     RANDOM_STATE,
     df,
     feat_cols,
+    print,
     run_cross_plate_batch,
 ):
     batch_result = run_cross_plate_batch(
@@ -743,7 +918,7 @@ def _(
     )
 
     if "message" in batch_result:
-        print(batch_result["message"])
+        print(f"SC-20 SKIP — {batch_result['message']}")
     else:
         print("=== Application B: Cross-Plate Batch Assessment ===\n")
         print(f"Plates: {batch_result['n_plates']}")
@@ -756,15 +931,22 @@ def _(
         print("\n--- SC-20 ---")
         print(f"  Meaningful batch-affected: {_sc20['n_batch_affected']}")
         print(f"  Affected: {_sc20['batch_affected_treatments']}")
-        print(f"  SC-20: {'PASS' if _sc20['sc20_pass'] else 'FAIL'}")
+        print(f"  SC-20: {'PASS' if _sc20['sc20_pass'] else 'WARN'}")
     return (batch_result,)
 
 
 @app.cell
-def _(FIGS_DIR, batch_result, plot_cross_plate_batch):
+def _(FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, batch_result, plot_cross_plate_batch, print):
     _output_path = FIGS_DIR / "app_b_cross_plate_batch.png"
-    _figure = plot_cross_plate_batch(batch_result, output_path=str(_output_path))
-    print(f"✓ Application B figure saved: {_output_path}" if _figure is not None else "ℹ Application B figure not generated because the analysis was skipped.")
+    _write_path = None if _output_path.exists() and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_cross_plate_batch(batch_result, output_path=_write_path)
+    print(
+        "ℹ Figure skipped: cross-plate analysis is not applicable."
+        if _figure is None
+        else f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure written and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -785,19 +967,24 @@ def _(mo):
     of the same treatment–dose and negatives are other doses of that treatment.
     It measures within-dose consistency, not dose monotonicity or MoA
     distinctiveness.
+
+    **How to read SC-21:** PASS supports orderly dose-related change; WARN
+    identifies a non-monotonic series to inspect; SKIP means the design has no
+    evaluable multi-dose treatment. It is informational and does not determine
+    whether a phenotype is active.
     """)
     return
 
 
 @app.cell
-def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_dose_response):
+def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, print, run_dose_response):
     dose_result = run_dose_response(
         df, feat_cols, CONFIG.treatment_col, CONFIG.concentration_col,
         null_size_copairs=NULL_SIZE, seed=RANDOM_STATE,
     )
 
     if "message" in dose_result:
-        print(dose_result["message"])
+        print(f"SC-21 SKIP — {dose_result['message']}")
     else:
         print("=== Application C: Dose-Response ===\n")
         print(f"Multi-dose treatments: {dose_result['multi_dose_treatments']}")
@@ -809,16 +996,27 @@ def _(CONFIG, NULL_SIZE, RANDOM_STATE, df, feat_cols, run_dose_response):
         print(dose_result["sc21_status"].to_string(index=False))
         if dose_result["dose_map"] is not None:
             print("\n--- Dose-level phenotypic-consistency mAP (PC mAP) ---")
-            print(dose_result["dose_map"][["Metadata_Treatment_Dose", "mean_average_precision",
-                "corrected_p_value"]].to_string(index=False))
+            print(
+                dose_result["dose_map"][["Metadata_Treatment_Dose", "mean_average_precision",
+                    "corrected_p_value"]]
+                .rename(columns={"mean_average_precision": "PC_mean_average_precision"})
+                .to_string(index=False)
+            )
     return (dose_result,)
 
 
 @app.cell
-def _(FIGS_DIR, dose_result, plot_dose_response):
+def _(FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, dose_result, plot_dose_response, print):
     _output_path = FIGS_DIR / "app_c_dose_response.png"
-    _figure = plot_dose_response(dose_result, output_path=str(_output_path))
-    print(f"✓ Application C figure saved: {_output_path}" if _figure is not None else "ℹ Application C figure not generated because the analysis was skipped.")
+    _write_path = None if _output_path.exists() and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_dose_response(dose_result, output_path=_write_path)
+    print(
+        "ℹ Figure skipped: dose-response analysis is not applicable."
+        if _figure is None
+        else f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure written and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -832,8 +1030,10 @@ def _(mo):
     controls? For each treatment: **phenotypic-activity mAP** vs negcon
     (copairs, reference
     indexing), FDR-corrected p-value, and Cohen's d effect size. **SC-22**:
-    poscon activity mAP should be high; treatments with activity mAP ≈ null have no
-    detectable phenotype.
+    positive-control activity mAP should be high and configured negative-control
+    treatments should remain near the pooled negative-control baseline.
+    Experimental treatments with activity mAP ≈ null are reported as an
+    informative biological result, not a QC failure.
 
     **Cohen's d and activity mAP answer different questions.** Cohen's d measures
     *effect magnitude* (how big is the change?); activity mAP measures
@@ -851,6 +1051,15 @@ def _(mo):
     - **High d + Low activity mAP** — large effect size but heterogeneous response; the phenotype exists but isn't consistently recovered.
     - **Low d + High activity mAP** — small but highly reproducible phenotype: subtle changes, consistently detected.
     - **Low d + Low activity mAP** — no detectable phenotypic signature, or changes indistinguishable from the negative control.
+
+    **How to read SC-22:** this critical control/phenotype check fails when a
+    positive control lacks activity, when a configured negative-control
+    treatment departs from the pooled negative-control baseline. Inactive tested
+    treatments are listed as INFO because an inactive compound does not mean the
+    experiment failed. Missing positive-control evidence is reported as FAIL,
+    never PASS. A failure calls for control-well/platemap
+    review and may justify rerunning with a scientifically supported control
+    definition; it does not justify silently relabeling controls.
     """)
     return
 
@@ -862,6 +1071,7 @@ def _(
     RANDOM_STATE,
     df,
     feat_cols,
+    print,
     run_treatment_vs_control,
 ):
     tvc_result = run_treatment_vs_control(
@@ -871,10 +1081,26 @@ def _(
     )
 
     print("=== Application D: Treatment vs Control ===\n")
-    print(tvc_result["results"].to_string(index=False))
+    print(
+        tvc_result["results"]
+        .rename(
+            columns={
+                "mAP_vs_negcon": "activity_mAP_vs_negcon",
+                "normalized_mAP": "normalized_activity_mAP",
+            }
+        )
+        .to_string(index=False)
+    )
     print("\n--- SC-22 ---")
     for _check in tvc_result["sc22_status"]["checks"]:
-        print(f"  [{'PASS' if _check['pass'] else 'FAIL'}] {_check['description']}")
+        _status = (
+            "INFO"
+            if not _check.get("critical", True)
+            else "PASS"
+            if _check["pass"]
+            else "FAIL"
+        )
+        print(f"  [{_status}] {_check['description']}")
     print(f"  Overall: {'PASS' if tvc_result['sc22_status']['sc22_pass'] else 'FAIL'}")
 
     _non_negcon = tvc_result["results"][~tvc_result["results"]["is_negcon"]]
@@ -891,10 +1117,69 @@ def _(
 
 
 @app.cell
-def _(FIGS_DIR, plot_treatment_vs_control, tvc_result):
+def _(CONFIG, mo, qc_result, tvc_result):
+    _control_profiles = tvc_result["results"][
+        tvc_result["results"]["is_negcon"] | tvc_result["results"]["is_poscon"]
+    ][
+        [
+            "treatment",
+            "control_type",
+            "is_negcon",
+            "is_poscon",
+            "mAP_vs_negcon",
+            "normalized_mAP",
+            "fdr_significant",
+            "cohens_d",
+            "effect_detectability_quadrant",
+        ]
+    ].rename(
+        columns={
+            "mAP_vs_negcon": "activity_mAP_vs_negcon",
+            "normalized_mAP": "normalized_activity_mAP",
+        }
+    )
+    _sc19_failures = int((~qc_result["sc19_status"]["sc19_pass"]).sum())
+    _sc22_failures = sum(
+        not _check["pass"] for _check in tvc_result["sc22_status"]["checks"]
+    )
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+                ### Integrated control-performance review
+
+                This table brings the control evidence together. SC-19 checks
+                **within-plate consistency**; SC-22 checks **activity relative to
+                the negative-control reference**. A valid positive control should
+                be reproducible and active. A negative-control treatment should
+                remain near the pooled negative-control baseline.
+
+                - Configured negative controls: {', '.join(f'`{v}`' for v in CONFIG.negcon_values) or 'none'}
+                - Configured positive controls: {', '.join(f'`{v}`' for v in CONFIG.poscon_values) or 'none'}
+                - Plates failing SC-19: **{_sc19_failures}**
+                - Failed SC-22 control/activity checks: **{_sc22_failures}**
+
+                If control evidence fails, treat the Go/No-Go result as an
+                experimental/QC problem to investigate before downstream
+                interpretation. Do not silently remove or relabel a control.
+                """
+            ),
+            _control_profiles,
+        ]
+    )
+    return (_control_profiles,)
+
+
+@app.cell
+def _(FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, plot_treatment_vs_control, print, tvc_result):
     _output_path = FIGS_DIR / "app_d_treatment_vs_control.png"
-    _figure = plot_treatment_vs_control(tvc_result, output_path=str(_output_path))
-    print(f"✓ Application D figure saved: {_output_path}")
+    _write_path = None if _output_path.exists() and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_treatment_vs_control(tvc_result, output_path=_write_path)
+    print(
+        f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure written and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -906,9 +1191,9 @@ def _(mo):
 
     Only runs if `CONFIG.has_time_axis` is `True` (a time/exposure column
     with more than one unique value was detected during column
-    resolution). This experiment is single-time-point, so this section is
-    expected to print a skip message — the framework activates
-    automatically for time-course experiments with no notebook changes.
+    resolution). With a single time point, SKIP is the correct result rather
+    than an error. The framework activates automatically for time-course
+    experiments with no notebook changes.
     """)
     return
 
@@ -922,6 +1207,7 @@ def _(
     RANDOM_STATE,
     df,
     feat_cols,
+    print,
     run_time_course,
 ):
     time_result = run_time_course(
@@ -946,10 +1232,17 @@ def _(
 
 
 @app.cell
-def _(FIGS_DIR, plot_time_course, time_result):
+def _(FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, plot_time_course, print, time_result):
     _output_path = FIGS_DIR / "section8_time_course.png"
-    _figure = plot_time_course(time_result, output_path=str(_output_path))
-    print(f"✓ Time-course figure saved: {_output_path}" if _figure is not None else "ℹ Time-course figure not generated because the analysis was skipped.")
+    _write_path = None if _output_path.exists() and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_time_course(time_result, output_path=_write_path)
+    print(
+        "ℹ Figure skipped: time-course analysis is not applicable."
+        if _figure is None
+        else f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure written and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -980,13 +1273,31 @@ def _(mo):
 def _(
     CONFIG,
     batch_result,
+    control_inventory,
     dose_result,
     generate_go_nogo_dashboard,
     qc_result,
+    sc18_status,
     time_result,
     tvc_result,
+    pd,
+    print,
 ):
     dashboard = generate_go_nogo_dashboard(qc_result, batch_result, dose_result, tvc_result, time_result)
+    _sc18_row = pd.DataFrame(
+        [
+            {
+                "check_id": "SC-18",
+                "name": "Profile integrity and replication readiness",
+                "n_pass": int(sc18_status == "PASS"),
+                "n_total": 1,
+                "pass": sc18_status == "PASS",
+                "critical": True,
+                "details": "Profile table is structurally valid for QC",
+            }
+        ]
+    )
+    dashboard["checks"] = pd.concat([_sc18_row, dashboard["checks"]], ignore_index=True)
     dashboard["analysis_mode"] = CONFIG.analysis_mode
     dashboard["reported_decision"] = (
         f"PRELIMINARY — {dashboard['decision']}"
@@ -1009,10 +1320,92 @@ def _(
 
 
 @app.cell
-def _(FIGS_DIR, dashboard, plot_go_nogo_dashboard):
+def _(batch_result, dose_result, mo, pd, qc_result, sc18_status, tvc_result):
+    _sc19_pass = bool(qc_result["sc19_status"]["sc19_pass"].all())
+    if "message" in batch_result:
+        _sc20_status = "SKIP"
+        _sc20_evidence = batch_result["message"]
+    else:
+        _sc20_status = "PASS" if batch_result["sc20_status"]["sc20_pass"] else "WARN"
+        _sc20_evidence = (
+            f"{batch_result['sc20_status']['n_batch_affected']} treatment(s) with meaningful cross-plate PR loss"
+        )
+    if "message" in dose_result:
+        _sc21_status = "SKIP"
+        _sc21_evidence = dose_result["message"]
+    else:
+        _sc21_table = dose_result["sc21_status"]
+        _sc21_pass = bool(_sc21_table["sc21_pass"].all()) if "sc21_pass" in _sc21_table else True
+        _sc21_status = "PASS" if _sc21_pass else "WARN"
+        _sc21_evidence = f"{int(_sc21_table['sc21_pass'].sum())}/{len(_sc21_table)} multi-dose treatment(s) pass" if "sc21_pass" in _sc21_table else "No evaluable monotonicity result"
+
+    sanity_check_summary = pd.DataFrame(
+        [
+            {
+                "Check": "SC-18 — Profile integrity and replication readiness",
+                "Status": sc18_status,
+                "Evidence": "One finite profile per well with complete grouping metadata",
+                "How to act": "Blocking if FAIL; return to NB02",
+            },
+            {
+                "Check": "SC-19 — Per-plate control consistency",
+                "Status": "PASS" if _sc19_pass else "FAIL",
+                "Evidence": f"{int(qc_result['sc19_status']['sc19_pass'].sum())}/{len(qc_result['sc19_status'])} plate(s) pass",
+                "How to act": "Review missing or inconsistent control wells if FAIL",
+            },
+            {
+                "Check": "SC-20 — Cross-plate consistency",
+                "Status": _sc20_status,
+                "Evidence": _sc20_evidence,
+                "How to act": "SKIP is expected for one plate; inspect technical structure if WARN",
+            },
+            {
+                "Check": "SC-21 — Dose-response ordering",
+                "Status": _sc21_status,
+                "Evidence": _sc21_evidence,
+                "How to act": "Inspect non-monotonic dose series if WARN",
+            },
+            {
+                "Check": "SC-22 — Control activity and phenotype detectability",
+                "Status": "PASS" if tvc_result["sc22_status"]["sc22_pass"] else "FAIL",
+                "Evidence": "; ".join(
+                    _check["description"]
+                    for _check in tvc_result["sc22_status"]["checks"]
+                    if _check.get("critical", True)
+                ),
+                "How to act": "Review control identity/performance before downstream interpretation if FAIL",
+            },
+        ]
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### Sanity-check interpretation summary
+
+                PASS supports the stated technical criterion; WARN requires
+                review but is not automatically blocking; FAIL invalidates a
+                critical QC criterion; SKIP means the analysis is not defined
+                for this design. None of these labels alone establishes a
+                mechanism of action.
+                """
+            ),
+            sanity_check_summary,
+        ]
+    )
+    return (sanity_check_summary,)
+
+
+@app.cell
+def _(FIGS_DIR, OVERWRITE_EXISTING_OUTPUTS, dashboard, plot_go_nogo_dashboard, print):
     _output_path = FIGS_DIR / "section9_go_nogo_dashboard.png"
-    _figure = plot_go_nogo_dashboard(dashboard, output_path=str(_output_path))
-    print(f"✓ Go/No-Go dashboard figure saved: {_output_path}")
+    _write_path = None if _output_path.exists() and not OVERWRITE_EXISTING_OUTPUTS else str(_output_path)
+    _figure = plot_go_nogo_dashboard(dashboard, output_path=_write_path)
+    print(
+        f"ℹ Existing figure protected; current figure displayed but not written: {_output_path}"
+        if _write_path is None
+        else f"✓ Figure written and displayed: {_output_path}"
+    )
     _figure
     return
 
@@ -1037,21 +1430,60 @@ def _(
     batch_result,
     dashboard,
     dose_result,
-    loaded_config,
+    mo,
+    pd,
+    print,
     qc_result,
+    sc18_checks,
+    sanity_check_summary,
     tvc_result,
     write_summary_table_protected,
 ):
-    _overwrite = loaded_config.overwrite_existing_outputs
+    _overwrite = CONFIG.overwrite_existing_outputs
 
     def _export(table, filename):
-        status = write_summary_table_protected(table, RESULTS_DIR / filename, overwrite=_overwrite)
+        try:
+            status = write_summary_table_protected(
+                table, RESULTS_DIR / filename, overwrite=_overwrite
+            )
+        except FileExistsError as _error:
+            mo.stop(
+                True,
+                mo.callout(
+                    mo.md(
+                        "**A protected NB03 table differs from the current result.**\n\n"
+                        f"`{_error}`\n\nReview the changed inputs or QC settings. If replacement is "
+                        "intentional, enable **Overwrite existing outputs** under Advanced settings."
+                    ),
+                    kind="danger",
+                ),
+            )
         print(f"  {filename}: {status}")
 
     print("=== Application A outputs ===")
+    _export(
+        pd.DataFrame(
+            [
+                {"check": _name, "pass": _passed}
+                for _name, _passed in sc18_checks
+            ]
+        ),
+        "sc18_profile_integrity.csv",
+    )
+    _export(control_inventory, "control_inventory.csv")
+    _export(sanity_check_summary, "sanity_check_summary.csv")
     _export(qc_result["pr_results"], "app_a_per_plate_pr.csv")
     _export(qc_result["pm_results"], "app_a_per_plate_pm.csv")
-    _export(qc_result["map_results"], "app_a_per_plate_map.csv")
+    _export(
+        qc_result["map_results"].rename(
+            columns={
+                "mAP_from_scratch": "PC_mAP_from_scratch",
+                "mAP_copairs": "PC_mAP_copairs",
+                "mAP_diff": "PC_mAP_difference",
+            }
+        ),
+        "app_a_per_plate_map.csv",
+    )
     _export(qc_result["qc_flags"], "app_a_qc_flags.csv")
     _export(qc_result["sc19_status"], "app_a_sc19_status.csv")
 
@@ -1060,7 +1492,9 @@ def _(
         _export(batch_result["batch_assessment"], "app_b_batch_assessment.csv")
         _export(
             batch_result["cross_plate_map"][[CONFIG.treatment_col, "mean_average_precision",
-                "p_value", "corrected_p_value"]],
+                "p_value", "corrected_p_value"]].rename(
+                    columns={"mean_average_precision": "cross_plate_PC_mean_average_precision"}
+                ),
             "app_b_cross_plate_map.csv",
         )
     else:
@@ -1082,13 +1516,29 @@ def _(
             import pandas as _pd
             _export(_pd.DataFrame(_dose_corr_rows), "app_c_dose_correlations.csv")
         if dose_result.get("dose_map") is not None:
-            _export(dose_result["dose_map"], "app_c_dose_map.csv")
+            _export(
+                dose_result["dose_map"].rename(
+                    columns={
+                        "mean_average_precision": "PC_mean_average_precision",
+                        "mean_normalized_average_precision": "normalized_PC_mean_average_precision",
+                    }
+                ),
+                "app_c_dose_map.csv",
+            )
         _export(dose_result["sc21_status"], "app_c_sc21_status.csv")
     else:
         print(f"  skipped: {dose_result['message']}")
 
     print("=== Application D outputs ===")
-    _export(tvc_result["results"], "app_d_treatment_vs_control.csv")
+    _export(
+        tvc_result["results"].rename(
+            columns={
+                "mAP_vs_negcon": "activity_mAP_vs_negcon",
+                "normalized_mAP": "normalized_activity_mAP",
+            }
+        ),
+        "app_d_treatment_vs_control.csv",
+    )
 
     print("=== Section 9 outputs ===")
     _export(dashboard["checks"], "section9_dashboard_checks.csv")
@@ -1096,7 +1546,7 @@ def _(
 
 
 @app.cell
-def _(EXPERIMENT_ID, RESULTS_DIR, dashboard):
+def _(CONFIG, EXPERIMENT_ID, RESULTS_DIR, dashboard, mo, print):
     _report_lines = [
         f"# Quality Metrics Go/No-Go Report — {EXPERIMENT_ID}",
         f"## Decision: {dashboard['reported_decision']}",
@@ -1107,19 +1557,36 @@ def _(EXPERIMENT_ID, RESULTS_DIR, dashboard):
         f"- Treatments: {dashboard['metric_summary']['n_treatments']}",
         f"- Mean PR fraction: {dashboard['metric_summary']['mean_pr_fraction']:.1%}",
         f"- Cross-plate PR: {dashboard['metric_summary']['cross_plate_pr']}",
-        f"- Mean treatment PC mAP: {dashboard['metric_summary']['mean_treatment_map']:.3f}",
+        f"- Mean treatment activity mAP: {dashboard['metric_summary']['mean_treatment_map']:.3f}",
         f"- FDR significant treatments: {dashboard['metric_summary']['n_fdr_significant']}",
         f"- Positive-control activity mAP: {dashboard['metric_summary']['poscon_map']}",
         "\n## Check Details",
     ]
     for _, _row in dashboard["checks"].iterrows():
-        _status = "PASS" if _row["pass"] else "FAIL"
+        _status = "PASS" if _row["pass"] else "FAIL" if _row["critical"] else "WARN"
         _crit = "CRITICAL" if _row["critical"] else "non-critical"
         _report_lines.append(f"- [{_status}] {_row['check_id']} ({_crit}): {_row['details']}")
 
     _report_path = RESULTS_DIR / "quality_metrics_report.md"
-    _report_path.write_text("\n".join(_report_lines), encoding="utf-8")
-    print(f"✓ Go/No-Go report written: {_report_path}")
+    _report_text = "\n".join(_report_lines)
+    if _report_path.exists() and _report_path.read_text(encoding="utf-8") == _report_text:
+        _report_status = "unchanged"
+    elif _report_path.exists() and not CONFIG.overwrite_existing_outputs:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**The protected Markdown QC report differs from the current result.**\n\n"
+                    f"Existing file: `{_report_path}`\n\nReview the new QC decision. Enable "
+                    "**Overwrite existing outputs** only if replacement is intended."
+                ),
+                kind="danger",
+            ),
+        )
+    else:
+        _report_status = "replaced" if _report_path.exists() else "created"
+        _report_path.write_text(_report_text, encoding="utf-8")
+    print(f"✓ Go/No-Go report {_report_status}: {_report_path}")
     return
 
 
@@ -1135,6 +1602,7 @@ def _(mo):
 def _(
     CONFIG,
     EXPERIMENT_ID,
+    INPUT_PATH,
     REPO_ROOT,
     RESULTS_DIR,
     dashboard,
@@ -1142,48 +1610,81 @@ def _(
     df,
     feat_cols,
     json,
+    n_negcon_wells,
+    n_poscon_wells,
     platform,
+    print,
     subprocess,
     timezone,
 ):
-    def _run_git_command(args):
-        try:
-            result = subprocess.run(
-                ["git", *args], cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return result.stdout.strip() or None if result.returncode == 0 else None
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
 
-    _git_commit = _run_git_command(["rev-parse", "HEAD"])
-
-    provenance = {
-        "notebook": "03_quality_metrics.py",
-        "experiment_id": EXPERIMENT_ID,
+    _legacy_provenance = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "git_hash": (_git_commit or "unknown")[:8],
-        "n_wells": int(df.shape[0]),
-        "n_features": int(len(feat_cols)),
-        "analysis_mode": CONFIG.analysis_mode,
-        "included_plates": CONFIG.included_plates,
-        "excluded_plate_reasons": CONFIG.excluded_plate_reasons,
-        "required_reference_treatments": CONFIG.required_reference_treatments,
-        "decision": dashboard["decision"],
-        "reported_decision": dashboard["reported_decision"],
-        "rationale": dashboard["rationale"],
-        "metric_summary": dashboard["metric_summary"],
-        "python_version": platform.python_version(),
+        "configuration": {
+            "analysis_mode": CONFIG.analysis_mode,
+            "included_plates": CONFIG.included_plates,
+            "excluded_plate_reasons": CONFIG.excluded_plate_reasons,
+            "required_reference_treatments": CONFIG.required_reference_treatments,
+            "overwrite_existing_outputs": CONFIG.overwrite_existing_outputs,
+        },
+        "dataset": {
+            "n_wells": int(df.shape[0]),
+            "n_features": int(len(feat_cols)),
+            "n_negcon_wells": n_negcon_wells,
+            "n_poscon_wells": n_poscon_wells,
+        },
+        "analysis": {
+            "decision": dashboard["decision"],
+            "reported_decision": dashboard["reported_decision"],
+            "rationale": dashboard["rationale"],
+            "metric_summary": dashboard["metric_summary"],
+        },
     }
 
-    _prov_path = RESULTS_DIR / "provenance.json"
-    _prov_path.write_text(json.dumps(provenance, indent=2, default=str), encoding="utf-8")
+    _declared_outputs = [
+        RESULTS_DIR / "quality_metrics_report.md",
+        RESULTS_DIR / "section9_dashboard_checks.csv",
+        RESULTS_DIR / "app_a_per_plate_map.csv",
+        RESULTS_DIR / "app_d_treatment_vs_control.csv",
+    ]
+    provenance = canonicalize_provenance(
+        _legacy_provenance,
+        notebook="03_quality_metrics.py",
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PATH],
+        outputs=_declared_outputs,
+    )
 
-    print(f"Provenance saved: {_prov_path}")
-    print(f"  Notebook:   {provenance['notebook']}")
-    print(f"  Experiment: {provenance['experiment_id']}")
-    print(f"  Timestamp:  {provenance['timestamp']}")
-    print(f"  Git hash:   {provenance['git_hash']}")
-    print(f"  Decision:   {provenance['reported_decision']}")
+    _prov_path = RESULTS_DIR / "provenance.json"
+    _prov_existed = _prov_path.exists()
+    _provenance_payload = provenance_json(provenance)
+    if _prov_existed and not CONFIG.overwrite_existing_outputs:
+        _provenance_status = "unchanged (existing provenance protected)"
+    else:
+        _prov_path.write_text(_provenance_payload, encoding="utf-8")
+        _provenance_status = "replaced" if _prov_existed else "created"
+
+    print(f"✓ Latest provenance {_provenance_status}: {_prov_path}")
+    print(f"  Schema:     v{provenance['schema_version']}")
+    print(f"  Notebook:   {provenance['pipeline']['notebook']}")
+    print(f"  Experiment: {provenance['pipeline']['experiment_id']}")
+    print(f"  Timestamp:  {provenance['pipeline']['executed_at_utc']}")
+    print(f"  Git hash:   {provenance['version_control']['git_commit_short']}")
+    print(f"  Inputs:     {len(provenance['dependencies'])} hashed dependency record(s)")
+    print(f"  Decision:   {provenance['analysis']['reported_decision']}")
+    if CONFIG.save_provenance_history:
+        _history_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _history_path = RESULTS_DIR / f"provenance_{_history_timestamp}.json"
+        if _history_path.exists():
+            raise FileExistsError(f"Historical provenance file already exists: {_history_path}")
+        _history_path.write_text(
+            _provenance_payload, encoding="utf-8"
+        )
+        print(f"✓ Timestamped provenance created: {_history_path}")
+    else:
+        print("  Timestamped provenance: disabled")
     return (provenance,)
 
 
@@ -1196,14 +1697,20 @@ def _(mo):
 
 
 @app.cell
-def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, provenance):
+def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, print, provenance):
     _required_outputs = [
         RESULTS_DIR / "app_a_qc_flags.csv",
+        RESULTS_DIR / "sc18_profile_integrity.csv",
+        RESULTS_DIR / "control_inventory.csv",
+        RESULTS_DIR / "sanity_check_summary.csv",
         RESULTS_DIR / "app_a_sc19_status.csv",
         RESULTS_DIR / "app_d_treatment_vs_control.csv",
         RESULTS_DIR / "section9_dashboard_checks.csv",
         RESULTS_DIR / "quality_metrics_report.md",
         RESULTS_DIR / "provenance.json",
+        FIGS_DIR / "app_a_per_plate_qc.png",
+        FIGS_DIR / "app_d_treatment_vs_control.png",
+        FIGS_DIR / "section9_go_nogo_dashboard.png",
     ]
     _missing = [p for p in _required_outputs if not Path(p).exists()]
     if _missing:
@@ -1223,7 +1730,7 @@ def _(EXPERIMENT_ID, FIGS_DIR, Path, RESULTS_DIR, dashboard, provenance):
     print(f"    {RESULTS_DIR}")
     print("  Figures directory:")
     print(f"    {FIGS_DIR}")
-    print(f"  Provenance: {provenance['timestamp']}")
+    print(f"  Provenance: {provenance['pipeline']['executed_at_utc']} (schema v{provenance['schema_version']})")
     print("\nNext step: NB04 — Phenotypic profiling")
     return
 
@@ -1242,9 +1749,8 @@ def _(mo):
     3. **Dose-response** — PC mAP within each treatment–dose; SC-21 for ordering
     4. **Treatment vs control** — activity mAP: phenotype detection vs negcon
 
-    MoA-based phenotypic-distinctiveness mAP is not computed in NB03.
-
-    combined into the SC-19 → SC-22 **Go/No-Go decision**.
+    MoA-based phenotypic-distinctiveness mAP is not computed in NB03. These
+    applications are combined into the SC-18 → SC-22 **Go/No-Go decision**.
 
     ### Key outputs
     - `results/quality_metrics/*.csv` — all metric tables
@@ -1258,47 +1764,29 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Save the notebook's **current session** without rerunning cells:
+
+    - **HTML** preserves code and the complete rich-output record;
+    - **PDF** provides a clean reading copy without code inputs.
+
+    Chromium can write both files directly to the experiment's `reports/`
+    folder after authorization. Safari shows separate HTML and PDF download
+    buttons because it cannot write directly to a selected folder.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_03_quality_metrics",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 

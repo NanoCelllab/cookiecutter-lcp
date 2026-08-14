@@ -1,4 +1,4 @@
-"""Generic plotting helpers shared across HCA analysis notebooks.
+"""Generic plotting helpers shared across LCP analysis notebooks.
 
 Ports the scatter-panel helper from
 ``03_phenotypic_profiling_parallel_spaces.ipynb`` and the fingerprint-heatmap
@@ -17,9 +17,52 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+
+def save_figure_protected(
+    figure: plt.Figure,
+    path: Path,
+    *,
+    overwrite: bool,
+    **savefig_kwargs,
+) -> str:
+    """Save a figure while honoring the pipeline overwrite policy."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not overwrite:
+        return "preserved"
+    status = "replaced" if path.exists() else "created"
+    figure.savefig(path, **savefig_kwargs)
+    return status
+
 # ---------------------------------------------------------------------------
 # Generic scatter panel (e.g. PCA/UMAP embeddings colored by metadata)
 # ---------------------------------------------------------------------------
+
+
+def categorical_palette(n_categories: int) -> list:
+    """Return distinct categorical colors without repeating at 10 groups."""
+    if n_categories <= 0:
+        return []
+    if n_categories <= 10:
+        return list(plt.get_cmap("tab10").colors[:n_categories])
+    if n_categories <= 20:
+        return list(plt.get_cmap("tab20").colors[:n_categories])
+    cmap = plt.get_cmap("turbo").resampled(n_categories)
+    return [cmap(index) for index in range(n_categories)]
+
+
+def add_categorical_legend(ax: plt.Axes, n_categories: int, **kwargs) -> None:
+    """Place small legends inside and large legends outside the plotting area."""
+    defaults = {"fontsize": 7, "markerscale": 0.8, "frameon": True}
+    defaults.update(kwargs)
+    if n_categories <= 10:
+        ax.legend(loc="best", **defaults)
+    else:
+        columns = max(1, math.ceil(n_categories / 20))
+        ax.legend(
+            loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0,
+            ncol=columns, **defaults,
+        )
 
 
 def scatter_panel(
@@ -40,11 +83,7 @@ def scatter_panel(
         plt.colorbar(sc, ax=ax, label="Concentration")
     else:
         unique = sorted(set(labels))
-        # tab10 has 10 discrete colors; cycle through them for >10 categories,
-        # matching seaborn's tab10 palette behavior without adding a seaborn
-        # dependency to this module.
-        tab10 = plt.get_cmap("tab10").colors
-        palette = [tab10[i % len(tab10)] for i in range(len(unique))]
+        palette = categorical_palette(len(unique))
         for lbl, color in zip(unique, palette):
             mask = [item == lbl for item in labels]
             ax.scatter(
@@ -57,7 +96,7 @@ def scatter_panel(
                 edgecolors="k",
                 linewidths=0.4,
             )
-        ax.legend(fontsize=7, markerscale=0.8, loc="best")
+        add_categorical_legend(ax, len(unique))
     ax.set_title(title)
 
 
@@ -75,6 +114,7 @@ def plot_fingerprint_heatmap(
     diverging: bool = False,
     fixed_range: tuple[float, float] | None = None,
     dpi: int = 180,
+    overwrite: bool = True,
 ) -> plt.Figure | None:
     """Render and save a category x condition fingerprint heatmap.
 
@@ -83,6 +123,15 @@ def plot_fingerprint_heatmap(
     """
     if matrix.empty:
         return None
+    output_path = Path(output_path)
+    if output_path.exists() and not overwrite:
+        image = plt.imread(output_path)
+        fig, ax = plt.subplots(figsize=(max(9, image.shape[1] / 180), max(4.5, image.shape[0] / 180)))
+        ax.imshow(image)
+        ax.axis("off")
+        fig.tight_layout(pad=0)
+        plt.close(fig)
+        return fig
 
     n_rows, n_columns = matrix.shape
 
@@ -232,6 +281,7 @@ def plot_condition_radar_grid(
     output_path: Path,
     max_columns: int = 4,
     dpi: int = 180,
+    overwrite: bool = True,
 ) -> plt.Figure | None:
     """Create one small radar per experimental condition (matrix column).
 
@@ -240,6 +290,15 @@ def plot_condition_radar_grid(
     """
     if matrix.empty:
         return None
+    output_path = Path(output_path)
+    if output_path.exists() and not overwrite:
+        image = plt.imread(output_path)
+        fig, ax = plt.subplots(figsize=(max(8, image.shape[1] / 180), max(5, image.shape[0] / 180)))
+        ax.imshow(image)
+        ax.axis("off")
+        fig.tight_layout(pad=0)
+        plt.close(fig)
+        return fig
 
     categories = matrix.index.tolist()
     conditions = matrix.columns.tolist()
@@ -290,6 +349,7 @@ def plot_dose_overlay_radars(
     concentration_label_column: str = "Metadata_Concentration_Label",
     max_columns: int = 4,
     dpi: int = 180,
+    overwrite: bool = True,
 ) -> plt.Figure | None:
     """Create one radar per treatment with all its concentrations overlaid.
 
@@ -302,6 +362,15 @@ def plot_dose_overlay_radars(
     """
     if matrix.empty:
         return None
+    output_path = Path(output_path)
+    if output_path.exists() and not overwrite:
+        image = plt.imread(output_path)
+        fig, ax = plt.subplots(figsize=(max(8, image.shape[1] / 180), max(5, image.shape[0] / 180)))
+        ax.imshow(image)
+        ax.axis("off")
+        fig.tight_layout(pad=0)
+        plt.close(fig)
+        return fig
 
     categories = matrix.index.tolist()
 

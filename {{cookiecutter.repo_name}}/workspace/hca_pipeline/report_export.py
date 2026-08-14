@@ -1,4 +1,10 @@
-"""Export a marimo notebook to a paginated, print-friendly PDF report.
+"""Export helpers for marimo analysis reports.
+
+The preferred interface is :class:`SessionReportSaver`, an AnyWidget that
+asks the browser for the experiment's ``reports/`` directory and saves both
+HTML and PDF snapshots of the *current marimo session*.  It deliberately
+uses marimo's live-session export endpoints, so no notebook cells are run
+again and stochastic or expensive results cannot silently change.
 
 `marimo export pdf` goes through nbconvert's WebPDF exporter, which has three
 limitations that matter for a report a student hands in:
@@ -42,9 +48,240 @@ import sys
 import tempfile
 from pathlib import Path
 
+import anywidget
 import nbformat
+import traitlets
 from nbconvert import HTMLExporter
 from playwright.sync_api import sync_playwright
+
+
+class SessionReportSaver(anywidget.AnyWidget):
+    """Browser control that saves the current marimo session as HTML + PDF.
+
+    Directory handles are retained by the browser in IndexedDB.  Chromium
+    browsers can therefore write directly to the chosen ``reports/`` folder;
+    other browsers fall back to ordinary downloads.
+    """
+
+    basename = traitlets.Unicode("analysis_report").tag(sync=True)
+    suggested_directory = traitlets.Unicode("reports").tag(sync=True)
+
+    _esm = r"""
+function render({ model, el }) {
+  const root = document.createElement("section");
+  root.className = "lcp-session-report-saver";
+  root.innerHTML = `
+    <style>
+      .lcp-session-report-saver {
+        border: 1px solid color-mix(in srgb, var(--blue-7, #2563eb) 28%, transparent);
+        border-radius: 12px; padding: 16px; background: var(--slate-1, #f8fafc);
+        color: var(--slate-12, #172033); font: 14px/1.5 system-ui, sans-serif;
+      }
+      .lcp-session-report-saver button {
+        border: 0; border-radius: 8px; padding: 9px 14px; cursor: pointer;
+        color: white; background: var(--blue-9, #2563eb); font-weight: 650;
+      }
+      .lcp-session-report-saver button:disabled { opacity: .6; cursor: wait; }
+      .lcp-session-report-saver code { overflow-wrap: anywhere; }
+      .lcp-session-report-saver .hint { margin: 0 0 12px; color: var(--slate-11, #475569); }
+      .lcp-session-report-saver .status { margin-top: 12px; white-space: pre-wrap; }
+      .lcp-session-report-saver .ok { color: #08783e; }
+      .lcp-session-report-saver .error { color: #b42318; }
+      .lcp-session-report-saver .download-links { display: flex; gap: 8px; margin-top: 10px; }
+      .lcp-session-report-saver .download-links a {
+        border: 1px solid currentColor; border-radius: 7px; padding: 6px 10px;
+        color: var(--blue-9, #2563eb); text-decoration: none; font-weight: 650;
+      }
+      @media print { .lcp-session-report-saver { display: none !important; } }
+    </style>
+    <p class="hint">Suggested folder: <code></code><br>
+      Select this folder the first time. The browser will remember it for future exports.</p>
+    <button type="button">Save record (HTML + PDF)</button>
+    <div class="status" role="status" aria-live="polite">No cells will be run again.</div>`;
+
+  const code = root.querySelector("code");
+  const button = root.querySelector("button");
+  const status = root.querySelector(".status");
+  code.textContent = model.get("suggested_directory");
+  el.replaceChildren(root);
+
+  const setStatus = (message, kind = "") => {
+    status.className = `status ${kind}`;
+    status.textContent = message;
+  };
+
+  const openDatabase = () => new Promise((resolve, reject) => {
+    const request = indexedDB.open("lcp-analysis-report-folders", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("handles");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  async function storedHandle(operation, value) {
+    const db = await openDatabase();
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction("handles", operation === "get" ? "readonly" : "readwrite");
+      const store = transaction.objectStore("handles");
+      const request = operation === "get"
+        ? store.get("reports-directory")
+        : store.put(value, "reports-directory");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    }).finally(() => db.close());
+  }
+
+  async function chooseDirectory() {
+    let handle = null;
+    try { handle = await storedHandle("get"); } catch (_) { /* picker still works */ }
+    if (handle) {
+      let permission = await handle.queryPermission({ mode: "readwrite" });
+      if (permission === "prompt") permission = await handle.requestPermission({ mode: "readwrite" });
+      if (permission === "granted") return handle;
+    }
+    handle = await window.showDirectoryPicker({
+      id: "lcp-analysis-reports", mode: "readwrite", startIn: "documents"
+    });
+    try { await storedHandle("put", handle); } catch (_) { /* stable picker id also remembers it */ }
+    return handle;
+  }
+
+  async function runtimeClient() {
+    const urls = performance.getEntriesByType("resource").map((entry) => entry.name);
+    for (const url of urls.filter((value) => /\/assets\/config-[^/]+\.js(?:\?|$)/.test(value))) {
+      try {
+        const module = await import(url);
+        if (typeof module.r !== "function") continue;
+        const client = module.r();
+        if (client && typeof client.headers === "function" && typeof client.formatHttpURL === "function") {
+          return client;
+        }
+      } catch (_) { /* try the next config module */ }
+    }
+    throw new Error("The current marimo session could not be accessed. Reload the page and try again.");
+  }
+
+  async function exportBlob(client, path, body) {
+    const response = await fetch(client.formatHttpURL({ path }).toString(), {
+      method: "POST",
+      headers: { ...client.headers(), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Export failed at ${path} (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    return await response.blob();
+  }
+
+  async function improveHtml(blob) {
+    const css = `<style id="lcp-report-readability">
+      :root { color-scheme: light; }
+      body { line-height: 1.55; }
+      main, marimo-island { max-width: 1180px; margin-inline: auto; }
+      img, svg, canvas { max-width: 100%; height: auto; }
+      pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
+      table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+      th, td { padding: .35rem .55rem; vertical-align: top; }
+      @media print {
+        details { display: block !important; }
+        pre, figure, table { break-inside: avoid; }
+        a { color: inherit; text-decoration: none; }
+      }
+    </style>`;
+    const source = await blob.text();
+    const enhanced = source.includes("</head>")
+      ? source.replace("</head>", `${css}</head>`)
+      : `${css}${source}`;
+    return new Blob([enhanced], { type: "text/html;charset=utf-8" });
+  }
+
+  const timestamp = () => {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  };
+
+  async function writeFile(directory, name, blob) {
+    const file = await directory.getFileHandle(name, { create: true });
+    const writable = await file.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  }
+
+  const fallbackUrls = [];
+  function offerDownloads(files, isSafari) {
+    setStatus(
+      isSafari
+        ? "Safari cannot write directly to the reports/ folder or start both downloads from one click. Use each button below to save the HTML and PDF separately. No cells were run again."
+        : "This browser cannot write directly to a folder. Use each button below to save the HTML and PDF separately. No cells were run again.",
+      "ok",
+    );
+    const links = document.createElement("div");
+    links.className = "download-links";
+    for (const [label, name, blob] of files) {
+      const url = URL.createObjectURL(blob);
+      fallbackUrls.push(url);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = name;
+      anchor.textContent = label;
+      links.append(anchor);
+    }
+    status.append(links);
+  }
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      fallbackUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+      let directory = null;
+      if ("showDirectoryPicker" in window) {
+        setStatus("Choose the experiment's reports/ folder…");
+        directory = await chooseDirectory();
+      }
+      setStatus("Capturing the current session as HTML and PDF…");
+      const client = await runtimeClient();
+      const [rawHtml, pdf] = await Promise.all([
+        exportBlob(client, "/api/export/html", {
+          download: false, files: [], includeCode: true, assetUrl: null
+        }),
+        exportBlob(client, "/api/export/pdf", {
+          webpdf: true, preset: "document", includeInputs: false,
+          rasterizeOutputs: false, rasterScale: 4.0, rasterServer: "static"
+        }),
+      ]);
+      const html = await improveHtml(rawHtml);
+      const suffix = timestamp();
+      const stem = model.get("basename").replace(/[^A-Za-z0-9._-]+/g, "_");
+      const htmlName = `${stem}_${suffix}.html`;
+      const pdfName = `${stem}_${suffix}.pdf`;
+      if (directory) {
+        await writeFile(directory, htmlName, html);
+        await writeFile(directory, pdfName, pdf);
+        setStatus(`✓ Record saved in the selected folder:\n  ${htmlName}\n  ${pdfName}\nNo cells were run again.`, "ok");
+      } else {
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        offerDownloads(
+          [
+            ["Download HTML", htmlName, html],
+            ["Download PDF", pdfName, pdf],
+          ],
+          isSafari,
+        );
+      }
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        setStatus("Saving was cancelled; no files were created.");
+      } else {
+        setStatus(`The record could not be saved: ${error?.message ?? error}`, "error");
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+export default { render };
+"""
 
 _MARIMO_MIME_RENDERER_RE = re.compile(
     r"<marimo-mime-renderer\b[^>]*>\s*</marimo-mime-renderer>", re.DOTALL,

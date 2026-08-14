@@ -12,7 +12,12 @@ from .config import (
     find_column,
     validate_configuration,
 )
-from .feature_select import infer_feature_cols, select_features
+from .feature_select import (
+    infer_feature_cols,
+    is_technical_identifier_column,
+    select_features,
+    technical_identifier_columns,
+)
 from .io import (
     checkpoint_matches_plate_scope,
     find_repo_root,
@@ -43,6 +48,13 @@ from .metrics_qc import (
     run_per_plate_qc,
 )
 from .normalize import normalize_per_plate_mad_robustize
+from .provenance import (
+    PROVENANCE_SCHEMA_VERSION,
+    canonicalize_provenance,
+    file_record,
+    provenance_json,
+    validate_provenance_record,
+)
 from .schema import (
     compare_schemas,
     describe_schema,
@@ -60,7 +72,9 @@ __all__ = [
     "find_column",
     "validate_configuration",
     "infer_feature_cols",
+    "is_technical_identifier_column",
     "select_features",
+    "technical_identifier_columns",
     "checkpoint_matches_plate_scope",
     "find_repo_root",
     "parquet_structure",
@@ -85,6 +99,11 @@ __all__ = [
     "run_dose_response",
     "run_per_plate_qc",
     "normalize_per_plate_mad_robustize",
+    "PROVENANCE_SCHEMA_VERSION",
+    "canonicalize_provenance",
+    "file_record",
+    "provenance_json",
+    "validate_provenance_record",
     "compare_schemas",
     "describe_schema",
     "find_duplicate_like_columns",

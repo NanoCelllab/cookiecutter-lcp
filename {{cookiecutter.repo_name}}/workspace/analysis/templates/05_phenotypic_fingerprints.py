@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -23,8 +28,17 @@ def _(mo):
     sizes, a feature taxonomy, and fingerprint matrices/plots at multiple
     grouping levels.
 
-    Inspired by the grouped Cell Painting radar-plot workflow developed by
-    Jonne, adapted here to the LCP (Acridine Orange GFP/PI ± Hoechst) assay.
+    ### Handoff from NB04
+
+    NB05 is the **canonical fingerprint workflow**. It reads NB02's normalized,
+    feature-selected per-well profile directly; it does not consume Harmony,
+    UMAP, LDA, clustering, or the optional compact preview from NB04. Complete
+    NB04 first so its profiling-space decision and confounder assessment are
+    documented, then use this notebook for all interpretable fingerprint
+    figures and tables.
+
+    The optional similarity/graph extensions in NB04 are not prerequisites for
+    NB05 and may remain disabled.
 
     ## Questions addressed
 
@@ -42,31 +56,24 @@ def _(mo):
     Harmony components do not map directly to interpretable categories such
     as `Intensity`, `Texture`, `AreaShape`, `AOGFP`, or `Nuclei`.
 
-    ## Changes relative to the legacy `.ipynb` version
+    ### What this notebook cannot tell you
 
-    This marimo notebook fixes two issues in the original notebook rather
-    than porting it verbatim:
+    Fingerprints summarize morphological effect magnitude and direction. They
+    do not establish molecular mechanism or causality, and a large effect may
+    still reflect toxicity, cell-count imbalance, segmentation artefacts, or
+    another confounder identified upstream.
 
-    1. **Graceful no-dose-axis path.** The legacy notebook unconditionally
-       assumed `Metadata_Concentration` exists (conditions = Treatment ×
-       Concentration; dose-overlay radar plots). If that column is absent it
-       crashed. This version checks `CONFIG.resolve_columns(df).has_dose_axis`
-       (the same pattern already used by `hca_pipeline.metrics_qc.run_dose_response`
-       for NB03) and, when there is no dose axis, builds conditions from
-       treatment alone and skips only the dose-overlay radar section with a
-       clear printed message — everything else still runs.
-    2. **`SPECIAL_TREATMENTS` is a widget, not a hardcoded literal.** The
-       legacy notebook hardcoded `{"Non-dormant"}` — a treatment name specific
-       to this study — to route certain conditions into a separate panel
-       instead of the dose grid. Here it is a `mo.ui.multiselect` populated
-       from this experiment's actual treatment values, defaulting to *empty*,
-       so a different dataset isn't stuck with a meaningless default.
+    If no dose axis exists, conditions are built from treatment alone and
+    only the dose-overlay visualization is skipped. Optional special-condition
+    panels use the experiment's actual metadata and default to none.
 
-    The legacy notebook's final "BONUS: Cell abundance and object counts"
-    section (~14 cells) was **dropped**, not ported: it referenced a
-    `feat_cols` name never defined in that notebook, used
-    `phenotypic_score_df` before it was defined, and had a hand-edited
-    "replace me" placeholder column name — it never actually ran end to end.
+    ### How controls appear
+
+    Negative-control wells define the reference phenotype used in every
+    Cohen's *d* comparison, so they are intentionally absent from fingerprint
+    heatmap columns. Positive controls are analyzed like other non-negative
+    conditions and should appear. The notebook validates and displays this
+    inventory before calculating effects.
 
     ## Main outputs
 
@@ -124,12 +131,11 @@ def _():
 
 
 @app.cell
-def _(Path):
+def _(Path, print):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
     # workspace). __file__ is used instead of cwd so this notebook
-    # behaves identically under `marimo edit`, a plain `python` run, or an
-    # automated headless run from any working directory.
+    # behaves identically regardless of the launch working directory.
     import sys
 
     _notebook_path = Path(__file__).resolve()
@@ -278,19 +284,17 @@ def _(loaded_config, mo):
         value=loaded_config.save_provenance_history, label="Save timestamped provenance history"
     )
 
-    mo.vstack(
-        [
-            channels_input,
-            effect_mode_input,
-            min_samples_input,
-            effect_threshold_input,
-            grouping_levels_input,
-            radar_groupings_input,
-            drop_other_input,
-            top_features_input,
-            overwrite_input,
-            save_history_input,
-        ]
+    mo.accordion(
+        {
+            "Advanced fingerprint and output settings": mo.vstack(
+                [
+                    channels_input, effect_mode_input, min_samples_input,
+                    effect_threshold_input, grouping_levels_input,
+                    radar_groupings_input, drop_other_input, top_features_input,
+                    overwrite_input, save_history_input,
+                ]
+            )
+        }
     )
     return (
         channels_input,
@@ -322,6 +326,7 @@ def _(
     replace,
     save_history_input,
     top_features_input,
+    print,
 ):
     EXPERIMENT_ID = experiment_id_input.value
 
@@ -377,15 +382,14 @@ def _(mo):
     mo.md(r"""
     ## 2 — Input and output directories
 
-    Missing directories are created automatically; existing directories are
-    reused. Existing legacy outputs elsewhere in the project are not moved
-    or deleted.
+    Missing directories are created automatically and existing directories
+    are reused. Outputs elsewhere in the project are not moved or deleted.
     """)
     return
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, print):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
     PROFILE_OUTPUT_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID / "outputs"
@@ -426,7 +430,7 @@ def _(mo):
 
 
 @app.cell
-def _(INPUT_PARQUET, pd):
+def _(INPUT_PARQUET, pd, print):
     df_loaded = pd.read_parquet(INPUT_PARQUET)
 
     _unnamed_columns = [c for c in df_loaded.columns if str(c).startswith("Unnamed:")]
@@ -441,12 +445,7 @@ def _(INPUT_PARQUET, pd):
 
 
 @app.cell
-def _(CONFIG, df_loaded):
-    # This is the fix for the legacy notebook's unconditional dose-axis
-    # assumption: CONFIG.resolve_columns(df) is the same pattern already used
-    # by hca_pipeline.metrics_qc.run_dose_response for NB03. has_dose_axis is
-    # False (rather than raising) whenever no concentration/dose column can be
-    # resolved against the actual data.
+def _(CONFIG, df_loaded, print):
     CONFIG_RESOLVED = CONFIG.resolve_columns(df_loaded)
 
     PLATE_COL = CONFIG_RESOLVED.plate_col
@@ -499,7 +498,7 @@ def _(CONFIG, df_loaded):
 
 
 @app.cell
-def _(df_loaded, infer_feature_cols, np):
+def _(df_loaded, infer_feature_cols, np, print):
     feature_cols = infer_feature_cols(df_loaded)
     if not feature_cols:
         raise ValueError("No CellProfiler feature columns were inferred.")
@@ -539,6 +538,7 @@ def _(
     TREATMENT_COL,
     df_loaded,
     np,
+    print,
 ):
     def format_concentration(value) -> str:
         """Format concentration values consistently for labels."""
@@ -571,6 +571,15 @@ def _(
     _negcon_values_lower = {str(v).lower() for v in CONFIG.negcon_values}
     negative_control_mask = df[CONTROL_COL].astype(str).str.lower().isin(_negcon_values_lower)
 
+    _poscon_values_lower = {str(v).lower() for v in CONFIG.poscon_values}
+    _overlapping_control_values = _negcon_values_lower & _poscon_values_lower
+    if _overlapping_control_values:
+        raise ValueError(
+            "Control configuration is ambiguous: these values are classified as both negative "
+            f"and positive controls: {sorted(_overlapping_control_values)}."
+        )
+    positive_control_mask = df[CONTROL_COL].astype(str).str.lower().isin(_poscon_values_lower)
+
     condition_table = (
         df.loc[
             ~negative_control_mask,
@@ -583,10 +592,35 @@ def _(
 
     condition_order = condition_table["Metadata_Condition"].tolist()
 
+    if int(negative_control_mask.sum()) < 2:
+        raise ValueError(
+            "Fingerprint reference check failed: fewer than two negative-control wells were found. "
+            f"Configured negative-control values: {CONFIG.negcon_values}; observed control values: "
+            f"{sorted(df[CONTROL_COL].astype(str).unique())}. Correct the platemap/configuration "
+            "before calculating Cohen's d."
+        )
+    if not condition_order:
+        raise ValueError(
+            "Fingerprint reference check failed: no non-negative-control conditions remain. "
+            "Check the control-type assignments in the platemap."
+        )
+
     print(f"Negative-control wells: {int(negative_control_mask.sum()):,}")
     print(
         f"Conditions: {len(condition_order):,}"
         + (" (treatment × concentration)" if HAS_DOSE_AXIS else " (treatment only — no dose axis)")
+    )
+    print(f"Positive-control wells retained as conditions: {int(positive_control_mask.sum()):,}")
+    print("\nControl inventory by metadata value and treatment:")
+    print(df.groupby([CONTROL_COL, TREATMENT_COL], dropna=False).size().rename("n_wells").to_string())
+    if int(positive_control_mask.sum()) == 0:
+        print(
+            "WARN — No positive-control wells were identified. Fingerprints can still be computed, "
+            "but this notebook cannot confirm that a positive reference condition is represented."
+        )
+    print(
+        "PASS — Fingerprint reference check: negative controls define the Cohen's d "
+        "reference and therefore do not appear as heatmap columns. Positive controls remain visible."
     )
 
     condition_table
@@ -596,6 +630,7 @@ def _(
         condition_table,
         df,
         negative_control_mask,
+        positive_control_mask,
     )
 
 
@@ -623,13 +658,14 @@ def _(
     TAXONOMY_DIR,
     build_taxonomy_table,
     feature_cols,
+    print,
     write_csv_protected,
 ):
     # hca_pipeline.taxonomy.DEFAULT_COMPARTMENT_PREFIXES only distinguishes the
     # 4 top-level CellProfiler objects (Cells/Cytoplasm/Nuclei/Vesicles) — the
     # same coarse vocabulary infer_feature_cols uses to detect feature columns
-    # at all. The legacy NB04 notebook additionally split out Nucleoli (a
-    # child object of Nuclei) and disambiguated "Cells_Mean_Vesicles_" /
+    # at all. The LCP hierarchy additionally splits out Nucleoli and
+    # disambiguates "Cells_Mean_Vesicles_" /
     # "Nuclei_Mean_Nucleoli_" child-object aggregate features from their
     # parent compartment. This is the standard LCP object hierarchy (not a
     # per-experiment design choice), so it is reconstructed here as an
@@ -690,6 +726,7 @@ def _(
     TAXONOMY_DIR,
     feature_taxonomy,
     pd,
+    print,
     write_summary_table_protected,
 ):
     _taxonomy_summary = []
@@ -725,6 +762,19 @@ def _(mo):
     risk of mixing treatment effects with residual plate differences. For
     `global` mode, each condition is compared directly against all negative
     controls pooled across plates.
+
+    Cohen's *d* is a standardized difference, not an activity probability:
+
+    - `d = 0` means the condition and negative-control means coincide;
+    - the sign indicates the direction in normalized feature space;
+    - `|d|` indicates magnitude, with the configurable threshold used only to
+      summarize the fraction of altered features;
+    - a large value may reflect biology, toxicity, segmentation, or another
+      confounder and should be interpreted alongside NB03/NB04 QC evidence.
+
+    This is an **advisory descriptive analysis**. Missing reference controls
+    are blocking; an individual condition with a weak fingerprint is not
+    automatically an experimental failure.
     """)
     return
 
@@ -746,6 +796,7 @@ def _(
     feature_cols,
     feature_taxonomy,
     negative_control_mask,
+    print,
     write_csv_protected,
 ):
     if EFFECT_ESTIMATION_MODE == "within_plate_weighted":
@@ -846,6 +897,7 @@ def _(
     build_fingerprint_matrix,
     condition_order,
     feature_effects,
+    print,
     write_csv_protected,
 ):
     fingerprint_matrices = {}
@@ -869,10 +921,14 @@ def _(
             )
             fingerprint_matrices[_grouping_level][_metric_name] = _matrix
 
-            write_csv_protected(
+            _status = write_csv_protected(
                 _matrix.reset_index(),
                 _grouping_results_dir / f"{_metric_name}.csv",
                 overwrite=CONFIG.overwrite_existing_outputs,
+            )
+            print(
+                f"  {_grouping_level}/{_metric_name}.csv: {_status} "
+                f"({_matrix.shape[0]} groups × {_matrix.shape[1]} conditions)"
             )
 
     print(f"✓ Fingerprint matrices generated for {len(GROUPING_LEVELS)} grouping level(s).")
@@ -889,11 +945,13 @@ def _(mo):
 
 @app.cell
 def _(
+    CONFIG,
     FIGURES_DIR,
     FIGURE_DPI,
     FINGERPRINT_METRICS,
     fingerprint_matrices,
     plot_fingerprint_heatmap,
+    print,
 ):
     # Every heatmap is still rendered and saved to disk here. They're kept in
     # a dict rather than displayed all at once (mo.vstack of all ~24 figures
@@ -906,19 +964,28 @@ def _(
         for _metric_name, _matrix in _metric_matrices.items():
             _metric_spec = FINGERPRINT_METRICS[_metric_name]
             _label = f"{_grouping_level.replace('_', ' ').title()} — {_metric_name.replace('_', ' ').title()}"
+            _figure_path = _grouping_figures_dir / f"{_metric_name}_heatmap.png"
+            _figure_status = (
+                "replaced" if _figure_path.exists() and CONFIG.overwrite_existing_outputs
+                else "preserved" if _figure_path.exists()
+                else "created"
+            )
             _fig = plot_fingerprint_heatmap(
                 _matrix,
                 title=_label,
                 colorbar_label=_metric_spec["label"],
-                output_path=_grouping_figures_dir / f"{_metric_name}_heatmap.png",
+                output_path=_figure_path,
                 diverging=(_metric_name == "mean_signed"),
                 fixed_range=(0, 1) if _metric_name == "fraction_altered" else None,
                 dpi=FIGURE_DPI,
+                overwrite=CONFIG.overwrite_existing_outputs,
             )
             if _fig is not None:
                 heatmap_figs_by_label[_label] = _fig
+                print(f"  {_label}: {_figure_status} — {_figure_path}")
 
-    print(f"✓ Saved {len(heatmap_figs_by_label)} fingerprint heatmap(s) to {FIGURES_DIR}")
+    print(f"✓ Generated and saved {len(heatmap_figs_by_label)} fingerprint heatmap(s)")
+    print(f"  Directory: {FIGURES_DIR}")
     return (heatmap_figs_by_label,)
 
 
@@ -960,6 +1027,7 @@ def _(mo):
 @app.cell
 def _(
     CONDITION_CONC_COL,
+    CONFIG,
     FIGURES_DIR,
     FIGURE_DPI,
     HAS_DOSE_AXIS,
@@ -971,6 +1039,7 @@ def _(
     np,
     plot_condition_radar_grid,
     plot_dose_overlay_radars,
+    print,
 ):
     if not HAS_DOSE_AXIS:
         print(
@@ -983,6 +1052,11 @@ def _(
     # rendered and saved to disk, but kept in a dict rather than mo.vstack'd
     # all at once, to stay under marimo's output-size limit.
     radar_figs_by_label = {}
+    def _figure_status(path):
+        if not path.exists():
+            return "created"
+        return "replaced" if CONFIG.overwrite_existing_outputs else "preserved"
+
     for _grouping_level in RADAR_GROUPINGS:
         if _grouping_level not in fingerprint_matrices:
             continue
@@ -997,50 +1071,66 @@ def _(
                 _mean_absolute.max(axis=0).replace(0, np.nan), axis=1
             ).fillna(0)
 
+            _figure_path = _grouping_figures_dir / "mean_absolute_radar_grid.png"
+            _status = _figure_status(_figure_path)
             _fig = plot_condition_radar_grid(
                 _mean_absolute,
                 title=f"{_title_prefix} — Mean absolute effect",
-                output_path=_grouping_figures_dir / "mean_absolute_radar_grid.png",
+                output_path=_figure_path,
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
+                overwrite=CONFIG.overwrite_existing_outputs,
             )
             if _fig is not None:
                 radar_figs_by_label[f"{_title_prefix} — Mean absolute effect"] = _fig
+                print(f"  {_title_prefix} mean-absolute radar: {_status} — {_figure_path}")
 
             if HAS_DOSE_AXIS:
+                _figure_path = _grouping_figures_dir / "mean_absolute_dose_overlay.png"
+                _status = _figure_status(_figure_path)
                 _fig = plot_dose_overlay_radars(
                     _mean_absolute,
                     condition_table=condition_table,
                     treatment_column=TREATMENT_COL,
                     concentration_column=CONDITION_CONC_COL,
                     title=f"{_title_prefix} — Dose overlays",
-                    output_path=_grouping_figures_dir / "mean_absolute_dose_overlay.png",
+                    output_path=_figure_path,
                     max_columns=RADAR_MAX_COLUMNS,
                     dpi=FIGURE_DPI,
+                    overwrite=CONFIG.overwrite_existing_outputs,
                 )
                 if _fig is not None:
                     radar_figs_by_label[f"{_title_prefix} — Dose overlays"] = _fig
+                    print(f"  {_title_prefix} dose-overlay radar: {_status} — {_figure_path}")
 
+            _figure_path = _grouping_figures_dir / "relative_shape_radar_grid.png"
+            _status = _figure_status(_figure_path)
             _fig = plot_condition_radar_grid(
                 _relative_shape,
                 title=f"{_title_prefix} — Relative fingerprint shape",
-                output_path=_grouping_figures_dir / "relative_shape_radar_grid.png",
+                output_path=_figure_path,
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
+                overwrite=CONFIG.overwrite_existing_outputs,
             )
             if _fig is not None:
                 radar_figs_by_label[f"{_title_prefix} — Relative fingerprint shape"] = _fig
+                print(f"  {_title_prefix} relative-shape radar: {_status} — {_figure_path}")
 
         if not _fraction_altered.empty:
+            _figure_path = _grouping_figures_dir / "fraction_altered_radar_grid.png"
+            _status = _figure_status(_figure_path)
             _fig = plot_condition_radar_grid(
                 _fraction_altered,
                 title=f"{_title_prefix} — Fraction of altered features",
-                output_path=_grouping_figures_dir / "fraction_altered_radar_grid.png",
+                output_path=_figure_path,
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
+                overwrite=CONFIG.overwrite_existing_outputs,
             )
             if _fig is not None:
                 radar_figs_by_label[f"{_title_prefix} — Fraction of altered features"] = _fig
+                print(f"  {_title_prefix} fraction-altered radar: {_status} — {_figure_path}")
 
     print(f"✓ Radar plots generated for {len(RADAR_GROUPINGS)} grouping level(s).")
     return (radar_figs_by_label,)
@@ -1091,6 +1181,7 @@ def _(TREATMENT_COL, condition_table, mo):
 
 @app.cell
 def _(
+    CONFIG,
     FIGURES_DIR,
     FIGURE_DPI,
     RADAR_GROUPINGS,
@@ -1099,6 +1190,7 @@ def _(
     condition_table,
     fingerprint_matrices,
     plot_condition_radar_grid,
+    print,
     special_treatments_input,
 ):
     _special_treatments = set(special_treatments_input.value)
@@ -1129,6 +1221,7 @@ def _(
                 output_path=_special_figures_dir / f"{_grouping_level}_mean_absolute.png",
                 max_columns=RADAR_MAX_COLUMNS,
                 dpi=FIGURE_DPI,
+                overwrite=CONFIG.overwrite_existing_outputs,
             )
             if _fig is not None:
                 special_figs_by_label[_label] = _fig
@@ -1176,6 +1269,7 @@ def _(
     TABLES_DIR,
     TOP_FEATURES_PER_CONDITION,
     feature_effects,
+    print,
     write_csv_protected,
 ):
     top_features = (
@@ -1277,10 +1371,13 @@ def _(
     np,
     pd,
     platform,
+    print,
     special_treatments_input,
     subprocess,
     timezone,
 ):
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
+
     def run_git_command(arguments: Sequence[str], repo_root) -> str | None:
         """Run a read-only Git command and return stripped stdout."""
         try:
@@ -1302,7 +1399,7 @@ def _(
     git_status = run_git_command(["status", "--porcelain"], REPO_ROOT)
 
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pipeline": {
             "notebook": "05_phenotypic_fingerprints.py",
             "experiment_id": EXPERIMENT_ID,
@@ -1349,23 +1446,31 @@ def _(
         },
     }
 
+    _declared_outputs = sorted(RESULTS_DIR.rglob("*.csv")) + sorted(FIGURES_DIR.rglob("*.png"))
+    provenance = canonicalize_provenance(
+        provenance,
+        notebook="05_phenotypic_fingerprints.py",
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=_declared_outputs,
+    )
     PROVENANCE_DIR.mkdir(parents=True, exist_ok=True)
     provenance_latest_path = PROVENANCE_DIR / "phenotypic_fingerprints_provenance.json"
-    provenance_latest_path.write_text(
-        json.dumps(provenance, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _provenance_payload = provenance_json(provenance)
+    if provenance_latest_path.exists() and not CONFIG.overwrite_existing_outputs:
+        _latest_status = "unchanged (existing provenance protected)"
+    else:
+        _latest_status = "replaced" if provenance_latest_path.exists() else "created"
+        provenance_latest_path.write_text(_provenance_payload, encoding="utf-8")
 
     provenance_history_path = None
     if CONFIG.save_provenance_history:
-        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         provenance_history_path = (
             PROVENANCE_DIR / f"phenotypic_fingerprints_provenance_{_timestamp}.json"
         )
-        if provenance_history_path.exists():
-            raise FileExistsError(f"Historical provenance file already exists: {provenance_history_path}")
-        provenance_history_path.write_text(
-            json.dumps(provenance, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        provenance_history_path.write_text(_provenance_payload, encoding="utf-8")
 
     print("═" * 72)
     print("PHENOTYPIC FINGERPRINT ANALYSIS — PROVENANCE")
@@ -1379,7 +1484,8 @@ def _(
     print(f"Dose axis         : {'yes' if HAS_DOSE_AXIS else 'no'}")
     print(f"Results           : {RESULTS_DIR}")
     print(f"Figures           : {FIGURES_DIR}")
-    print(f"\n✓ Latest provenance: {provenance_latest_path}")
+    print(f"\n✓ Latest provenance: {_latest_status} — {provenance_latest_path}")
+    print(f"  Schema v{provenance['schema_version']} · input/output hashes: {len(provenance['dependencies'])}/{len(provenance['outputs'])}")
     if provenance_history_path is not None:
         print(f"✓ Historical record: {provenance_history_path}")
     else:
@@ -1398,7 +1504,9 @@ def _(mo):
 @app.cell
 def _(
     EXPERIMENT_ID,
+    FINGERPRINT_METRICS,
     FIGURES_DIR,
+    GROUPING_LEVELS,
     RESULTS_DIR,
     TABLES_DIR,
     TAXONOMY_DIR,
@@ -1408,6 +1516,7 @@ def _(
     feature_effects,
     feature_taxonomy,
     fingerprint_matrices,
+    print,
     provenance_latest_path,
     top_features,
 ):
@@ -1431,6 +1540,14 @@ def _(
         TABLES_DIR / "top_altered_features_by_condition.csv",
         provenance_latest_path,
     ]
+    for _grouping_level in GROUPING_LEVELS:
+        for _metric_name in FINGERPRINT_METRICS:
+            _required_paths.extend(
+                [
+                    TABLES_DIR / _grouping_level / f"{_metric_name}.csv",
+                    FIGURES_DIR / _grouping_level / f"{_metric_name}_heatmap.png",
+                ]
+            )
     _missing_outputs = [p for p in _required_paths if not p.exists()]
     if _missing_outputs:
         integrity_errors.append(
@@ -1464,47 +1581,25 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Save the notebook's **current session** without rerunning cells. HTML
+    preserves rich outputs and expanded details; PDF provides a clean reading
+    copy without code. Chromium can save both directly to the experiment's
+    `reports/` folder after authorization. Safari provides separate downloads.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_05_phenotypic_fingerprints",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 

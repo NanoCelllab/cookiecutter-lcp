@@ -11,10 +11,160 @@ opts in via ``overwrite=True``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
+
+import sqlite3
 
 import numpy as np
 import pandas as pd
+
+
+SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+
+
+def discover_single_cell_inputs(
+    backend_dir: Path,
+    *,
+    previous_parquet: Path | None = None,
+) -> dict[str, list[Path]]:
+    """Discover supported NB01 inputs without treating absent outputs as errors.
+
+    SQLite databases and CellProfiler CSV exports are raw inputs.  A parquet
+    produced by an earlier NB01 run is an optional resume source; its absence
+    is the normal state on a first run.
+    """
+    backend_dir = Path(backend_dir)
+    files = sorted(p for p in backend_dir.iterdir() if p.is_file()) if backend_dir.is_dir() else []
+    discovered = {
+        "sqlite": [p for p in files if p.suffix.lower() in SQLITE_SUFFIXES],
+        "csv": [p for p in files if p.suffix.lower() == ".csv"],
+        "parquet": [],
+    }
+    if previous_parquet is not None and Path(previous_parquet).is_file():
+        discovered["parquet"] = [Path(previous_parquet)]
+    return discovered
+
+
+def _read_cellprofiler_tables(
+    tables: dict[str, pd.DataFrame],
+    *,
+    source_label: str,
+) -> pd.DataFrame:
+    """Merge CellProfiler Image/Cells/Cytoplasm/Nuclei tables by object IDs."""
+    required = {"image", "cells", "cytoplasm", "nuclei"}
+    missing = sorted(required - tables.keys())
+    if missing:
+        raise ValueError(f"{source_label}: missing CellProfiler tables: {missing}")
+
+    image = tables["image"]
+    cells = tables["cells"]
+    cytoplasm = tables["cytoplasm"]
+    nuclei = tables["nuclei"]
+    for name, frame in tables.items():
+        if frame.empty:
+            raise ValueError(f"{source_label}: table {name!r} is empty")
+        if "ImageNumber" not in frame.columns:
+            raise ValueError(f"{source_label}: table {name!r} has no ImageNumber column")
+
+    cell_object = "Cells_Number_Object_Number"
+    cyto_cell = "Cytoplasm_Parent_Cells"
+    nuclei_object = "Nuclei_Number_Object_Number"
+    cyto_nucleus = next(
+        (c for c in ("Cytoplasm_Parent_Nuclei", "Cytoplasm_Parent_NucleiWithBorders") if c in cytoplasm),
+        None,
+    )
+    missing_links = [
+        name
+        for name, present in (
+            (cell_object, cell_object in cells),
+            (cyto_cell, cyto_cell in cytoplasm),
+            (nuclei_object, nuclei_object in nuclei),
+            ("Cytoplasm_Parent_Nuclei*", cyto_nucleus is not None),
+        )
+        if not present
+    ]
+    if missing_links:
+        raise ValueError(f"{source_label}: missing object-link columns: {missing_links}")
+
+    merged = cytoplasm.merge(
+        cells,
+        left_on=["ImageNumber", cyto_cell],
+        right_on=["ImageNumber", cell_object],
+        how="inner",
+        validate="one_to_one",
+    )
+    merged = merged.merge(
+        nuclei,
+        left_on=["ImageNumber", cyto_nucleus],
+        right_on=["ImageNumber", nuclei_object],
+        how="inner",
+        validate="one_to_one",
+    )
+    merged = merged.merge(image, on="ImageNumber", how="left", validate="many_to_one")
+    if merged.empty:
+        raise ValueError(f"{source_label}: compartment merge produced zero cells")
+    return merged
+
+
+def read_cellprofiler_sqlite(
+    path: Path,
+    *,
+    progress: Callable[[str], None] = print,
+) -> pd.DataFrame:
+    """Read and merge a standard CellProfiler SQLite database."""
+    path = Path(path)
+    progress(f"Opening CellProfiler SQLite: {path.name}")
+    with sqlite3.connect(path) as connection:
+        available = {
+            row[0].lower(): row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        aliases = {
+            "image": ("per_image", "image"),
+            "cells": ("per_cells", "cells"),
+            "cytoplasm": ("per_cytoplasm", "cytoplasm"),
+            "nuclei": ("per_nuclei", "nuclei"),
+        }
+        tables = {}
+        for logical_name, candidates in aliases.items():
+            table_name = next((available[c] for c in candidates if c in available), None)
+            if table_name is None:
+                continue
+            progress(f"  Reading {table_name} …")
+            tables[logical_name] = pd.read_sql_query(f'SELECT * FROM "{table_name}"', connection)
+    result = _read_cellprofiler_tables(tables, source_label=path.name)
+    progress(f"  ✓ Merged {len(result):,} cells × {result.shape[1]:,} columns")
+    return result
+
+
+def read_cellprofiler_csvs(
+    paths: Sequence[Path],
+    *,
+    progress: Callable[[str], None] = print,
+) -> pd.DataFrame:
+    """Read either one merged profile CSV or four CellProfiler table CSVs."""
+    paths = [Path(path) for path in paths]
+    if len(paths) == 1:
+        progress(f"Reading merged single-cell CSV: {paths[0].name}")
+        return pd.read_csv(paths[0], low_memory=False)
+
+    aliases = {
+        "image": ("per_image", "image"),
+        "cells": ("per_cells", "cells"),
+        "cytoplasm": ("per_cytoplasm", "cytoplasm"),
+        "nuclei": ("per_nuclei", "nuclei"),
+    }
+    tables = {}
+    for path in paths:
+        normalized_stem = path.stem.lower()
+        logical_name = next(
+            (name for name, candidates in aliases.items() if normalized_stem in candidates),
+            None,
+        )
+        if logical_name is not None:
+            progress(f"  Reading {path.name} …")
+            tables[logical_name] = pd.read_csv(path, low_memory=False)
+    return _read_cellprofiler_tables(tables, source_label="CellProfiler CSV folder")
 
 
 def find_repo_root(
@@ -99,16 +249,17 @@ def write_csv_protected(df: pd.DataFrame, path: Path, *, overwrite: bool) -> str
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists():
+        if overwrite:
+            df.to_csv(path, index=False)
+            return "replaced"
         existing_header = pd.read_csv(path, nrows=0).columns.tolist()
         if existing_header == list(df.columns):
             return "unchanged"
-        if not overwrite:
-            raise FileExistsError(
-                "Existing CSV columns differ from the current dataset and "
-                f"the file was not overwritten: {path}"
-            )
-        df.to_csv(path, index=False)
-        return "replaced"
+        raise FileExistsError(
+            "Existing CSV columns differ from the current dataset and "
+            f"the file was not overwritten: {path}. Enable 'Overwrite existing outputs' "
+            "to replace this incompatible file, or move it aside to preserve the old run."
+        )
 
     df.to_csv(path, index=False)
     return "created"

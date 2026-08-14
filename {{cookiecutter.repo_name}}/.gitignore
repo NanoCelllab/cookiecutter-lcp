@@ -26,6 +26,9 @@ workspace_dl/**/runs/
 *.ckpt
 
 # --- Notebooks / caches / temp ---
+# Internal design notes kept only in each developer's working copy
+workspace/FUTURE_*.md
+
 **/.ipynb_checkpoints/
 **/__pycache__/
 *.pyc

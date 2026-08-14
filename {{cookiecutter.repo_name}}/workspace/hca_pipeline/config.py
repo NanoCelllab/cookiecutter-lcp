@@ -1,4 +1,4 @@
-"""Experiment configuration for the HCA analysis pipeline.
+"""Experiment configuration for the LCP analysis pipeline.
 
 Centralizes the knobs every pipeline notebook needs to be dataset-agnostic:
 which metadata columns exist, what control-type vocabulary this experiment
@@ -71,7 +71,7 @@ def validate_configuration(
             "EXPERIMENT_ID is missing.\n"
             "  Enter the experiment identifier exactly as it appears in "
             "the project folder name.\n"
-            '  Example: EXPERIMENT_ID = "2025_01_MCF7_NPPS_24h"'
+            '  Example: EXPERIMENT_ID = "my_experiment"'
         )
 
     elif experiment_id == "SET_EXPERIMENT_ID_HERE":
@@ -232,7 +232,7 @@ class ExperimentConfig:
     axis doesn't apply to this experiment -- notebooks branch on that instead
     of assuming every dataset has a dose or time dimension. ``image_root`` is
     ``None`` unless raw microscopy images are available for this experiment,
-    following the same pattern -- ``00_image_quality.py`` self-skips when it
+    following the same pattern -- ``extras/image_quality.py`` self-skips when it
     is unset. Control-type vocabulary is a *list* per role (not a single
     literal) since different platemap conventions use different labels for
     the same role.
@@ -269,6 +269,10 @@ class ExperimentConfig:
     included_plates: list[str] = field(default_factory=list)
     excluded_plate_reasons: dict[str, str] = field(default_factory=dict)
     required_reference_treatments: list[str] = field(default_factory=list)
+    # Optional presentation-only aliases. Keys always remain the original
+    # Metadata_Treatment values; aliases are used only in figures/tables where
+    # the full label would not fit. Analytical grouping is never renamed.
+    treatment_display_aliases: dict[str, str] = field(default_factory=dict)
     analysis_mode: str = "final"
 
     @staticmethod

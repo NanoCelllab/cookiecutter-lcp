@@ -22,6 +22,7 @@ def create_experiment(repo_root: Path, experiment_id: str) -> Path:
 
     workspace = repo_root / "workspace"
     notebook_templates = workspace / "analysis" / "templates"
+    extra_templates = workspace / "analysis" / "extras"
     metadata_templates = workspace / "metadata" / "templates"
     experiment_root = workspace / "analysis" / experiment_id
     notebook_dir = experiment_root / "analysis"
@@ -38,6 +39,10 @@ def create_experiment(repo_root: Path, experiment_id: str) -> Path:
         (temporary_root / "analysis").mkdir(parents=True)
         for template in sorted(notebook_templates.glob("*.py")):
             shutil.copy2(template, temporary_root / "analysis" / template.name)
+        if extra_templates.is_dir():
+            (temporary_root / "analysis" / "extras").mkdir()
+            for template in sorted(extra_templates.glob("*.py")):
+                shutil.copy2(template, temporary_root / "analysis" / "extras" / template.name)
         for name in ("outputs", "results", "figures", "reports"):
             (temporary_root / name).mkdir()
         temporary_root.rename(experiment_root)
@@ -62,7 +67,7 @@ def create_experiment(repo_root: Path, experiment_id: str) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Create an experiment folder and copy all marimo pipeline notebooks safely."
+        description="Create an experiment folder and copy the pipeline and optional extra notebooks safely."
     )
     parser.add_argument("experiment_id", help="For example: 2026_08_Huh7_NPPS_5_days")
     args = parser.parse_args()
@@ -74,8 +79,10 @@ def main() -> int:
         return 1
 
     notebooks = sorted(notebook_dir.glob("*.py"))
+    extras = sorted((notebook_dir / "extras").glob("*.py"))
     print(f"✓ Experiment created: {args.experiment_id}")
     print(f"  Notebooks: {notebook_dir} ({len(notebooks)} files)")
+    print(f"  Optional project-specific extras: {notebook_dir / 'extras'} ({len(extras)} files)")
     print(f"  Raw CellProfiler inputs: workspace/backend/{args.experiment_id}/")
     print(f"  Metadata: workspace/metadata/{args.experiment_id}/")
     print("\nOpen the first notebook with:")

@@ -715,14 +715,24 @@ def run_per_plate_qc(
         negcon_prs = [m for t, m in pr_medians.items() if trt_to_ctrl.get(t) in negcon_values]
         poscon_prs = [m for t, m in pr_medians.items() if trt_to_ctrl.get(t) in poscon_values]
 
-        negcon_pass = all(pr <= negcon_pr_threshold for pr in negcon_prs) if negcon_prs else True
-        poscon_pass = all(pr > poscon_pr_threshold for pr in poscon_prs) if poscon_prs else True
+        # Missing controls are unavailable evidence, never an automatic PASS.
+        # Treating an empty list as True (Python's ``all([])`` behavior) can
+        # incorrectly approve a plate whose platemap/control vocabulary is
+        # incomplete.
+        negcon_pass = bool(negcon_prs) and all(
+            pr <= negcon_pr_threshold for pr in negcon_prs
+        )
+        poscon_pass = bool(poscon_prs) and all(
+            pr > poscon_pr_threshold for pr in poscon_prs
+        )
 
         sc19_results.append({
             plate_col: plate,
             "negcon_pr_max": max(negcon_prs) if negcon_prs else None,
+            "negcon_available": bool(negcon_prs),
             "negcon_pass": negcon_pass,
             "poscon_pr_min": min(poscon_prs) if poscon_prs else None,
+            "poscon_available": bool(poscon_prs),
             "poscon_pass": poscon_pass,
             "sc19_pass": negcon_pass and poscon_pass,
         })
@@ -1390,25 +1400,56 @@ def run_treatment_vs_control(
         poscon_pass = poscon_rows["mAP_vs_negcon"].min() > 0.5
         sc22_checks.append({
             "check": "poscon_separation", "description": "Positive-control activity mAP > 0.5",
-            "value": float(poscon_rows["mAP_vs_negcon"].min()), "threshold": 0.5, "pass": poscon_pass,
+            "value": float(poscon_rows["mAP_vs_negcon"].min()), "threshold": 0.5,
+            "pass": poscon_pass, "critical": True,
         })
+    else:
+        sc22_checks.append({
+            "check": "poscon_separation",
+            "description": "Positive-control activity could not be evaluated because no positive-control profile was found",
+            "value": None,
+            "threshold": 0.5,
+            "pass": False,
+            "critical": True,
+        })
+
+    unexpected_negcon_activity = results_df[
+        results_df["is_negcon"] & (results_df["normalized_mAP"].abs() >= 0.05)
+    ]
+    sc22_checks.append({
+        "check": "negcon_baseline_activity",
+        "description": (
+            "Negative-control profiles remain near the pooled negative-control baseline"
+            if unexpected_negcon_activity.empty
+            else f"{len(unexpected_negcon_activity)} negative-control treatment(s) show |normalized activity mAP| >= 0.05"
+        ),
+        "value": unexpected_negcon_activity["treatment"].tolist(),
+        "threshold": 0.05,
+        "pass": unexpected_negcon_activity.empty,
+        "critical": True,
+    })
 
     no_phenotype = trt_rows[trt_rows["normalized_mAP"].abs() < 0.05]
     if len(no_phenotype) > 0:
         sc22_checks.append({
             "check": "no_phenotype_treatments",
             "description": f"{len(no_phenotype)} treatment(s) with |normalized_mAP| < 0.05",
-            "value": no_phenotype["treatment"].tolist(), "threshold": 0.05, "pass": False,
+            "value": no_phenotype["treatment"].tolist(), "threshold": 0.05,
+            "pass": True, "critical": False,
         })
     else:
         sc22_checks.append({
             "check": "no_phenotype_treatments",
-            "description": "All treatments show detectable phenotype", "value": 0, "threshold": 0.05, "pass": True,
+            "description": "All treatments show detectable phenotype", "value": 0,
+            "threshold": 0.05, "pass": True, "critical": False,
         })
 
     return {
         "results": results_df, "map_tvc": map_tvc,
-        "sc22_status": {"checks": sc22_checks, "sc22_pass": all(c["pass"] for c in sc22_checks)},
+        "sc22_status": {
+            "checks": sc22_checks,
+            "sc22_pass": all(c["pass"] for c in sc22_checks if c.get("critical", True)),
+        },
     }
 
 
@@ -1682,11 +1723,14 @@ def generate_go_nogo_dashboard(
 
     if "sc22_status" in tvc_result:
         sc22 = tvc_result["sc22_status"]
-        n_p = sum(1 for c in sc22["checks"] if c["pass"])
+        _critical_sc22 = [c for c in sc22["checks"] if c.get("critical", True)]
+        n_p = sum(1 for c in _critical_sc22 if c["pass"])
         checks.append({
-            "check_id": "SC-22", "name": "Treatment phenotype detectability",
-            "n_pass": n_p, "n_total": len(sc22["checks"]), "pass": sc22["sc22_pass"], "critical": True,
-            "details": "; ".join(f"{c['check']}: {'pass' if c['pass'] else 'fail'}" for c in sc22["checks"]),
+            "check_id": "SC-22", "name": "Control activity and phenotype detectability",
+            "n_pass": n_p, "n_total": len(_critical_sc22), "pass": sc22["sc22_pass"], "critical": True,
+            "details": "; ".join(
+                f"{c['check']}: {'pass' if c['pass'] else 'fail'}" for c in _critical_sc22
+            ),
         })
 
     if "sc21_status" in dose_result:
@@ -1759,7 +1803,8 @@ def plot_go_nogo_dashboard(dashboard: dict, output_path: str | None = None):
     ax.axis("off")
     table_data = []
     for _, row in checks.iterrows():
-        table_data.append([row["check_id"], "PASS" if row["pass"] else "FAIL",
+        _status = "PASS" if row["pass"] else ("FAIL" if row["critical"] else "WARN")
+        table_data.append([row["check_id"], _status,
                            "CRITICAL" if row["critical"] else "info", f"{row['n_pass']}/{row['n_total']}"])
     table_data.append(["", "", "", ""])
     table_data.append(["DECISION", dashboard["decision"], "", ""])
@@ -1784,7 +1829,7 @@ def plot_go_nogo_dashboard(dashboard: dict, output_path: str | None = None):
     _metric_labels = {
         "mean_pr_fraction": "mean PR fraction",
         "cross_plate_pr": "cross-plate PR",
-        "mean_treatment_map": "mean treatment PC mAP",
+        "mean_treatment_map": "mean treatment activity mAP",
         "poscon_map": "poscon activity mAP",
     }
     for k in ["mean_pr_fraction", "cross_plate_pr", "mean_treatment_map", "poscon_map"]:
@@ -1798,7 +1843,7 @@ def plot_go_nogo_dashboard(dashboard: dict, output_path: str | None = None):
         thresholds = {
             "mean PR fraction": 0.25,
             "cross-plate PR": 0.25,
-            "mean treatment PC mAP": 0.5,
+            "mean treatment activity mAP": 0.5,
             "poscon activity mAP": 0.5,
         }
         for i, (label, val) in enumerate(plot_metrics.items()):

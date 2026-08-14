@@ -100,6 +100,10 @@ def curate_single_cell_features(
     removed_low_variance = X_raw.columns[~variable_mask].tolist()
     feature_cols_model = X_raw.columns[variable_mask].tolist()
     X_raw = X_raw[feature_cols_model]
+    if not feature_cols_model:
+        raise ValueError(
+            "Single-cell feature curation removed every feature as non-variable or non-finite."
+        )
 
     imputer = SimpleImputer(strategy="median")
     X_imputed = imputer.fit_transform(X_raw)
@@ -117,6 +121,10 @@ def curate_single_cell_features(
         feature_cols_model[i] for i in np.where(stable_iqr_mask)[0]
     ]
     X_imputed = X_imputed[:, stable_iqr_mask]
+    if not feature_cols_model:
+        raise ValueError(
+            "Single-cell feature curation removed every remaining feature because its IQR was zero."
+        )
 
     scaler = RobustScaler()
     X_scaled = scaler.fit_transform(X_imputed)
@@ -255,6 +263,15 @@ def train_lgbm_classifier_with_shap(
     (the established optional-dependency convention used throughout this
     pipeline) instead of raising.
     """
+    labels_arr = np.asarray(labels)
+    groups_arr = np.asarray(groups)
+    if X.shape[0] != len(labels_arr) or X.shape[0] != len(groups_arr):
+        return {"message": "Classifier skipped: feature, label, and well arrays are not row-aligned."}
+    if len(np.unique(labels_arr)) < 2:
+        return {"message": "Classifier skipped: at least two treatment labels are required."}
+    if len(np.unique(groups_arr)) < 2:
+        return {"message": "Classifier skipped: at least two wells are required for grouped validation."}
+
     try:
         import lightgbm as lgb
     except ImportError:
@@ -265,14 +282,18 @@ def train_lgbm_classifier_with_shap(
     from sklearn.preprocessing import LabelEncoder
 
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(np.asarray(labels))
-    groups_arr = np.asarray(groups)
+    y = label_encoder.fit_transform(labels_arr)
 
     gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-    train_idx, test_idx = next(gss.split(X, y, groups_arr))
+    try:
+        train_idx, test_idx = next(gss.split(X, y, groups_arr))
+    except ValueError as error:
+        return {"message": f"Classifier skipped: grouped train/test split is not valid ({error})."}
 
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
+    if len(np.unique(y_train)) < 2:
+        return {"message": "Classifier skipped: the grouped training split contains fewer than two labels."}
 
     classifier = lgb.LGBMClassifier(
         n_estimators=n_estimators,
@@ -292,7 +313,12 @@ def train_lgbm_classifier_with_shap(
 
     y_pred = classifier.predict(X_test)
     report = classification_report(
-        y_test, y_pred, target_names=label_encoder.classes_, output_dict=True
+        y_test,
+        y_pred,
+        labels=np.arange(len(label_encoder.classes_)),
+        target_names=label_encoder.classes_,
+        output_dict=True,
+        zero_division=0,
     )
     result = {
         "classification_report": pd.DataFrame(report).T,

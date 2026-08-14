@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -20,15 +25,16 @@ def _(mo):
     **Pipeline step:** 4 of 6
     **Position in pipeline:** NB03 (quality metrics, Go/No-Go) → **NB04 (phenotypic profiling)** → NB05 (phenotypic fingerprints)
 
-    This notebook is meant to be run interactively (`marimo edit`), not
-    headlessly: NB03's Go/No-Go gate has already checked replicate signal,
-    but interpreting PCA/UMAP structure, choosing the final modelling space,
-    and judging cluster quality below are human-in-the-loop decisions.
+    NB03's Go/No-Go gate has already checked replicate signal. Here you will
+    inspect PCA/UMAP structure, evaluate whether plate or cell count is a
+    confounder, and compare modelling spaces before selecting the result used
+    downstream.
 
     **Input:** `per_well_features_selected.parquet` (from NB02), optional `cv_summary.csv` (from NB02)
     **Output:** profile-QC summaries, PCA/UMAP figures, optional Harmony-corrected coordinates,
-    LDA models, loadings, CV results, confusion matrices, KMeans models, phenotypic fingerprints,
-    and an evidence-based uncorrected-vs-Harmony comparison.
+    LDA models, loadings, CV results, confusion matrices, KMeans models, and an
+    evidence-based uncorrected-vs-Harmony comparison. NB05 owns the canonical
+    interpretable fingerprint outputs.
 
     ### Analysis sections
     | Section | Method | Purpose |
@@ -39,25 +45,38 @@ def _(mo):
     | 4 | Phenotypic profile QC | Visual and statistical assessment of plate effects |
     | 5 | Build latent spaces | Optional Harmony batch correction, in parallel with the uncorrected space |
     | 6 | Parallel modelling | UMAP + treatment/dose LDA + leave-one-plate-out CV + KMeans, run once per space |
-    | 7 | Phenotypic fingerprints | Cohen's *d* by Treatment × Concentration, heatmaps and radar overview |
+    | 7 | NB05 handoff | Optional legacy compact preview; canonical fingerprints run in NB05 |
     | 8 | Comparison & recommendation | Evidence-based uncorrected-vs-Harmony assessment |
+    | 8b/8c | Advanced exploration | Optional similarity matrices and graph clustering; disabled by default |
     | 9 | Provenance | Per-space and comparison provenance records |
     | 10 | Integrity checks | Confirm expected outputs exist and are internally consistent |
 
     ### Sanity checks
-    | ID | Check |
-    |----|-------|
-    | SC-11 | Visual and statistical plate-effect assessment |
-    | SC-12 | In-sample versus cross-validated LDA accuracy |
-    | SC-13 | KMeans cluster purity |
+    | ID | Question | Evidence | Decision role |
+    |----|----------|----------|---------------|
+    | SC-11 | Does plate identity structure the profiles? | Plate-coloured PCA plus multivariate plate statistics | Advisory; investigate/correct only when supported by evidence |
+    | SC-12 | Does supervised separation generalize? | In-sample versus held-out-plate LDA accuracy | Advisory; a large gap indicates overfitting |
+    | SC-13 | Do unsupervised clusters recover coherent phenotypes? | KMeans purity and stability | Exploratory; low purity is not an experiment failure |
 
     > Batch correction is not applied automatically. This notebook first measures technical
     > structure, reports the evidence, and then follows the explicit `FINAL_MODELLING_SPACE` choice.
 
-    This is a **marimo** port of `03_phenotypic_profiling_parallel_spaces.ipynb`. The core
-    modelling routine (`run_modelling_space`) now lives in `hca_pipeline.modelling`, already
-    smoke-tested; this notebook is mostly orchestration — config, data loading, calling the
-    shared routine once per latent space, plotting, and protected output writes.
+    The shared modelling routine (`run_modelling_space`) keeps the same checks
+    and output schema across every selected latent space.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### What this notebook cannot tell you
+
+    Separation in PCA, UMAP, LDA, or clustering does not establish causality
+    or molecular mechanism. A large apparent phenotype may still reflect
+    toxicity, cell-count imbalance, plate structure, segmentation artefacts,
+    or another confounder. Use NB03's control/QC evidence and the diagnostics
+    here before assigning a biological interpretation.
     """)
     return
 
@@ -135,12 +154,9 @@ def _(mo):
 def _(Path):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
-    # workspace/pipelines). __file__ is used instead of cwd so this notebook
-    # behaves identically under `marimo edit`, a plain `python` run, or an
-    # automated headless run from any working directory.
-    import os
+    # workspace). __file__ is used instead of cwd so this notebook
+    # behaves identically regardless of the working directory used to launch it.
     import sys
-    import tempfile
 
     _notebook_path = Path(__file__).resolve()
     _repo_root_candidate = None
@@ -156,18 +172,9 @@ def _(Path):
 
     REPO_ROOT = _repo_root_candidate
     _pipelines_dir = REPO_ROOT / "workspace"
-    _package_dir = _pipelines_dir / "hca_pipeline"
-    if not (_package_dir / "__init__.py").is_file():
-        raise FileNotFoundError(
-            f"hca_pipeline package not found: {_package_dir}. "
-            "Expected workspace/hca_pipeline/__init__.py."
-        )
+    if not (_pipelines_dir / "hca_pipeline").exists():
+        raise FileNotFoundError(f"hca_pipeline package directory not found: {_pipelines_dir / 'hca_pipeline'}")
     sys.path.insert(0, str(_pipelines_dir))
-    print(f"  ✓ Python package path configured: {_package_dir}")
-    _numba_cache_dir = Path(tempfile.gettempdir()) / "hca_pipeline_numba_cache"
-    _numba_cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["NUMBA_CACHE_DIR"] = str(_numba_cache_dir)
-    print(f"  ✓ Numba cache configured: {_numba_cache_dir}")
 
     from hca_pipeline.config import ExperimentConfig
     from hca_pipeline.feature_select import infer_feature_cols
@@ -182,7 +189,7 @@ def _(Path):
         safe_relative_change,
         validate_output_path,
     )
-    from hca_pipeline.plotting import plot_fingerprint_heatmap, scatter_panel
+    from hca_pipeline.plotting import categorical_palette, plot_fingerprint_heatmap, scatter_panel
     from hca_pipeline.stats import build_fingerprint_matrix, calculate_within_plate_effects, cohens_d
 
     print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
@@ -194,6 +201,7 @@ def _(Path):
         absolute_change,
         build_fingerprint_matrix,
         calculate_within_plate_effects,
+        categorical_palette,
         get_qc_metric,
         infer_feature_cols,
         plot_fingerprint_heatmap,
@@ -264,18 +272,49 @@ def _(loaded_config, mo):
         value=loaded_config.save_provenance_history,
         label="Save timestamped provenance history",
     )
-    mo.vstack([run_analysis_spaces_input, final_modelling_space_input, overwrite_input, save_history_input])
+    run_exploratory_extensions_input = mo.ui.checkbox(
+        value=False,
+        label="Run advanced similarity and graph-clustering extensions (Sections 8b/8c)",
+    )
+    run_compact_fingerprint_preview_input = mo.ui.checkbox(
+        value=False,
+        label="Run legacy compact fingerprint preview (canonical analysis is NB05)",
+    )
+    mo.accordion(
+        {
+            "Advanced analysis and output settings": mo.vstack(
+                [
+                    run_analysis_spaces_input,
+                    final_modelling_space_input,
+                    run_compact_fingerprint_preview_input,
+                    run_exploratory_extensions_input,
+                    overwrite_input,
+                    save_history_input,
+                ]
+            )
+        }
+    )
     return (
         final_modelling_space_input,
         overwrite_input,
         run_analysis_spaces_input,
+        run_compact_fingerprint_preview_input,
+        run_exploratory_extensions_input,
         save_history_input,
     )
 
 
 @app.cell
-def _(mo):
+def _(mo, run_compact_fingerprint_preview_input):
     random_state_input = mo.ui.number(value=42, start=0, stop=10_000, label="Random seed")
+    feature_scaling_input = mo.ui.dropdown(
+        options={
+            "Use NB02 mad_robustize values directly (recommended)": "mad_robustize_direct",
+            "Apply an additional global StandardScaler (sensitivity/legacy)": "global_standard_scaler",
+        },
+        value="mad_robustize_direct",
+        label="Feature weighting before PCA",
+    )
     n_pca_components_input = mo.ui.number(value=50, start=2, stop=500, label="PCA components")
     n_qc_permutations_input = mo.ui.number(
         value=999, start=99, stop=9_999, label="PERMANOVA/PERMDISP permutations"
@@ -286,17 +325,18 @@ def _(mo):
     homoscedasticity_ratio_input = mo.ui.number(
         value=3.0, start=1.0, stop=20.0, step=0.5, label="Homoscedasticity SD-ratio threshold"
     )
-    mo.vstack(
-        [
-            random_state_input,
-            n_pca_components_input,
-            n_qc_permutations_input,
-            cv_warn_threshold_input,
-            homoscedasticity_ratio_input,
-        ]
-    )
+    mo.accordion({"Advanced modelling parameters": mo.vstack([
+        mo.md(
+            "NB02 already median-centres and MAD-scales features against negative controls per plate. "
+            "The recommended option preserves that feature weighting. The legacy option globally "
+            "re-centres and rescales every feature and can materially change PCA geometry."
+        ),
+        feature_scaling_input, random_state_input, n_pca_components_input, n_qc_permutations_input,
+        cv_warn_threshold_input, homoscedasticity_ratio_input,
+    ])})
     return (
         cv_warn_threshold_input,
+        feature_scaling_input,
         homoscedasticity_ratio_input,
         n_pca_components_input,
         n_qc_permutations_input,
@@ -312,7 +352,16 @@ def _(mo):
     fingerprint_within_plate_input = mo.ui.checkbox(
         value=True, label="Combine Cohen's d within-plate (vs. global fallback)"
     )
-    mo.vstack([fingerprint_effect_threshold_input, fingerprint_within_plate_input])
+    if run_compact_fingerprint_preview_input.value:
+        _fingerprint_settings_display = mo.accordion({"Legacy NB04 fingerprint-preview parameters": mo.vstack(
+            [fingerprint_effect_threshold_input, fingerprint_within_plate_input]
+        )})
+    else:
+        _fingerprint_settings_display = mo.md(
+            "Fingerprint parameters are hidden because the compact NB04 preview is disabled. "
+            "Use NB05 for the canonical interpretable fingerprint analysis."
+        )
+    _fingerprint_settings_display
     return fingerprint_effect_threshold_input, fingerprint_within_plate_input
 
 
@@ -333,15 +382,11 @@ def _(mo):
     max_replicability_loss_input = mo.ui.number(
         value=0.05, start=0.0, stop=1.0, step=0.01, label="Max relative dose-CV balanced-accuracy loss tolerated"
     )
-    mo.vstack(
-        [
-            batch_r2_warn_input,
-            min_plate_r2_reduction_input,
-            max_treatment_r2_loss_input,
-            max_treatment_silhouette_loss_input,
-            max_replicability_loss_input,
-        ]
-    )
+    mo.accordion({"Advanced batch-comparison thresholds": mo.vstack([
+        batch_r2_warn_input, min_plate_r2_reduction_input,
+        max_treatment_r2_loss_input, max_treatment_silhouette_loss_input,
+        max_replicability_loss_input,
+    ])})
     return (
         batch_r2_warn_input,
         max_replicability_loss_input,
@@ -357,6 +402,7 @@ def _(
     cv_warn_threshold_input,
     experiment_id_input,
     final_modelling_space_input,
+    feature_scaling_input,
     fingerprint_effect_threshold_input,
     fingerprint_within_plate_input,
     homoscedasticity_ratio_input,
@@ -369,6 +415,8 @@ def _(
     overwrite_input,
     random_state_input,
     run_analysis_spaces_input,
+    run_compact_fingerprint_preview_input,
+    run_exploratory_extensions_input,
     save_history_input,
 ):
     EXPERIMENT_ID = experiment_id_input.value
@@ -376,8 +424,11 @@ def _(
     FINAL_MODELLING_SPACE = final_modelling_space_input.value
     OVERWRITE_EXISTING_OUTPUTS = bool(overwrite_input.value)
     SAVE_PROVENANCE_HISTORY = bool(save_history_input.value)
+    RUN_COMPACT_FINGERPRINT_PREVIEW = bool(run_compact_fingerprint_preview_input.value)
+    RUN_EXPLORATORY_EXTENSIONS = bool(run_exploratory_extensions_input.value)
 
     RANDOM_STATE = int(random_state_input.value)
+    FEATURE_SCALING = feature_scaling_input.value
     N_PCA_COMPONENTS = int(n_pca_components_input.value)
     N_QC_PERMUTATIONS = int(n_qc_permutations_input.value)
     CV_WARN_THRESHOLD = float(cv_warn_threshold_input.value)
@@ -409,10 +460,14 @@ def _(
     print(f"  Overwrite outputs      : {OVERWRITE_EXISTING_OUTPUTS}")
     print(f"  Save provenance history: {SAVE_PROVENANCE_HISTORY}")
     print(f"  Random seed            : {RANDOM_STATE}")
+    print(f"  Feature weighting      : {FEATURE_SCALING}")
+    print(f"  Exploratory extensions : {RUN_EXPLORATORY_EXTENSIONS}")
+    print(f"  Compact fingerprint preview: {RUN_COMPACT_FINGERPRINT_PREVIEW}")
     return (
         BATCH_R2_WARN_THRESHOLD,
         CV_WARN_THRESHOLD,
         EXPERIMENT_ID,
+        FEATURE_SCALING,
         FINAL_MODELLING_SPACE,
         FINGERPRINT_EFFECT_THRESHOLD,
         FINGERPRINT_USE_WITHIN_PLATE_EFFECTS,
@@ -426,6 +481,8 @@ def _(
         OVERWRITE_EXISTING_OUTPUTS,
         RANDOM_STATE,
         RUN_ANALYSIS_SPACES,
+        RUN_COMPACT_FINGERPRINT_PREVIEW,
+        RUN_EXPLORATORY_EXTENSIONS,
         SAVE_PROVENANCE_HISTORY,
     )
 
@@ -525,10 +582,8 @@ def _(INPUT_PARQUET, pd):
 
 @app.cell
 def _(REPO_ROOT, WIDGET_CONFIG, df_loaded):
-    # Auto-detect the actual metadata column names/vocabulary present in this
-    # experiment's data (rather than the source notebook's hardcoded
-    # NEGCON_LABEL="Non-treated" / TREATMENT_COL="Metadata_Treatment" style
-    # literals), then persist the resolved config for downstream notebooks.
+    # Auto-detect the metadata vocabulary present in this experiment and
+    # persist the resolved config for downstream notebooks.
     CONFIG = WIDGET_CONFIG.resolve_columns(df_loaded)
     _config_path = CONFIG.save(REPO_ROOT)
 
@@ -568,7 +623,7 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, df_loaded, feat_cols, np):
+def _(CONFIG, FEATURE_SCALING, df_loaded, feat_cols, np, print):
     from sklearn.preprocessing import StandardScaler
 
     df = df_loaded.dropna(subset=feat_cols).reset_index(drop=True)
@@ -587,21 +642,107 @@ def _(CONFIG, df_loaded, feat_cols, np):
     else:
         df["_dose_label"] = df[CONFIG.treatment_col].astype(str)
 
-    X_raw = df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0).values
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X_raw)
+    _raw_features = df[feat_cols].replace([np.inf, -np.inf], np.nan)
+    _n_nonfinite_replaced = int(_raw_features.isna().sum().sum())
+    if _n_nonfinite_replaced:
+        print(
+            f"⚠ Replaced {_n_nonfinite_replaced:,} non-finite feature value(s) with the "
+            "normalized-space center (0). Review NB02 SC-09b if this was unexpected."
+        )
+    else:
+        print("✓ No non-finite feature values required replacement")
+    X_raw = _raw_features.fillna(0).to_numpy()
+    if FEATURE_SCALING == "mad_robustize_direct":
+        X = X_raw.copy()
+        print("✓ Using NB02 mad_robustize values directly; no second scaling transform was applied")
+    elif FEATURE_SCALING == "global_standard_scaler":
+        X = StandardScaler().fit_transform(X_raw)
+        print("⚠ Applied the legacy global StandardScaler after NB02 mad_robustize normalization")
+    else:
+        raise ValueError(f"Unknown feature-scaling mode: {FEATURE_SCALING!r}")
 
     print(f"Feature matrix: {X.shape[0]} wells × {X.shape[1]} features")
     print(f"NaN after cleaning: {np.isnan(X).sum()}")
-    return X, df
+    return X, X_raw, df
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### Scaling sensitivity audit
+
+    NB02 has already normalized every plate against its negative controls with
+    `mad_robustize`. The audit below compares that declared profile space with
+    the legacy additional global `StandardScaler`. PERMANOVA R² describes how
+    much multivariate variation is associated with plate or treatment; it is
+    reported for sensitivity, not used as an automatic pass/fail criterion.
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONFIG,
+    N_PCA_COMPONENTS,
+    OVERWRITE_EXISTING_OUTPUTS,
+    PCA,
+    RANDOM_STATE,
+    RESULTS_DIR,
+    StandardScaler,
+    X_raw,
+    df,
+    pd,
+    print,
+    qc_record,
+    write_csv_protected,
+):
+    _sensitivity_rows = []
+    _scaling_spaces = {
+        "mad_robustize_direct": X_raw,
+        "global_standard_scaler": StandardScaler().fit_transform(X_raw),
+    }
+    _factors = {
+        "plate": df[CONFIG.plate_col].astype(str).to_numpy(),
+        "treatment": df[CONFIG.treatment_col].astype(str).to_numpy(),
+    }
+    for _space_name, _space_matrix in _scaling_spaces.items():
+        _n_components = min(N_PCA_COMPONENTS, *_space_matrix.shape)
+        _coordinates = PCA(
+            n_components=_n_components, random_state=RANDOM_STATE
+        ).fit_transform(_space_matrix)
+        for _factor_name, _labels in _factors.items():
+            _record = qc_record(
+                "scaling_sensitivity",
+                _factor_name,
+                _coordinates,
+                _labels,
+                permutations=99,
+                random_state=RANDOM_STATE,
+            )
+            _sensitivity_rows.append({"feature_scaling": _space_name, **_record})
+
+    scaling_sensitivity_df = pd.DataFrame(_sensitivity_rows)
+    _sensitivity_path = RESULTS_DIR / "scaling_sensitivity.csv"
+    _sensitivity_status = write_csv_protected(
+        scaling_sensitivity_df,
+        _sensitivity_path,
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    print("Scaling sensitivity (PCA-space multivariate QC):")
+    print(
+        scaling_sensitivity_df[
+            ["feature_scaling", "factor", "permanova_R2", "permanova_p", "silhouette"]
+        ].to_string(index=False)
+    )
+    print(f"✓ Scaling-sensitivity table {_sensitivity_status}: {_sensitivity_path}")
+    scaling_sensitivity_df
+    return (scaling_sensitivity_df,)
 
 
 @app.cell
 def _(CONFIG, df):
-    # Data-driven negative-control mask, replacing the source notebook's
-    # hardcoded NEGCON_LABEL="Non-treated" literal with the experiment's own
-    # control-type vocabulary (Section: unify control vocabulary onto
-    # ExperimentConfig).
+    # Use the experiment's configured control vocabulary instead of assuming a
+    # project-specific negative-control label.
     if CONFIG.control_type_col and CONFIG.control_type_col in df.columns:
         _negcon_values_lower = {v.lower() for v in CONFIG.negcon_values}
         negcon_mask = df[CONFIG.control_type_col].astype(str).str.lower().isin(_negcon_values_lower)
@@ -818,17 +959,15 @@ def _(mo):
 
 @app.cell
 def _(FIGS_DIR, N_PCA_COMPONENTS, PCA, RANDOM_STATE, X, np, plt):
-    _max_pca_components = min(X.shape[0], X.shape[1])
-    _n_pca_components = min(N_PCA_COMPONENTS, _max_pca_components)
-    if _n_pca_components < N_PCA_COMPONENTS:
-        print(
-            f"ℹ PCA components reduced from {N_PCA_COMPONENTS} to {_n_pca_components}: "
-            f"the input has {X.shape[0]} wells × {X.shape[1]} features."
-        )
-    else:
-        print(f"✓ PCA configured with {_n_pca_components} components.")
-    pca_full = PCA(n_components=_n_pca_components, random_state=RANDOM_STATE)
+    _n_pca = min(N_PCA_COMPONENTS, X.shape[0], X.shape[1])
+    pca_full = PCA(n_components=_n_pca, random_state=RANDOM_STATE)
     X_pca = pca_full.fit_transform(X)
+
+    if _n_pca < N_PCA_COMPONENTS:
+        print(
+            f"ℹ PCA components reduced from {N_PCA_COMPONENTS} to {_n_pca}: "
+            f"the dataset contains {X.shape[0]} wells and {X.shape[1]} features."
+        )
 
     _fig, _ax = plt.subplots(figsize=(9, 4))
     _n_show = min(30, X_pca.shape[1])
@@ -897,7 +1036,10 @@ def _(CONFIG, FIGS_DIR, X_pca, df, np, pca_full, plt, scatter_panel, well_cell_c
         edgecolors="k",
         linewidths=0.4,
     )
-    _fig.colorbar(_cell_count_scatter, ax=_axes[3], label="Number of cells per well")
+    _fig.colorbar(
+        _cell_count_scatter, ax=_axes[3], label="Number of cells per well",
+        location="right", fraction=0.046, pad=0.08,
+    )
     _axes[3].set_title("Cell count (potential confounder; log colour scale)")
 
     for _ax in _axes:
@@ -1007,9 +1149,7 @@ def _(
 ):
     from matplotlib.colors import LogNorm as _LogNorm
 
-    _n_regressed_components = min(X_pca.shape[1], X_cell_count_regressed.shape[0], X_cell_count_regressed.shape[1])
-    print(f"✓ Cell-count-regressed PCA configured with {_n_regressed_components} components.")
-    pca_cell_count_regressed = PCA(n_components=_n_regressed_components, random_state=RANDOM_STATE)
+    pca_cell_count_regressed = PCA(n_components=min(X_pca.shape[1], X.shape[1]), random_state=RANDOM_STATE)
     X_pca_cell_count_regressed = pca_cell_count_regressed.fit_transform(X_cell_count_regressed)
     _log_count = np.log10(np.clip(np.asarray(well_cell_counts, dtype=float), 1, None))
 
@@ -1028,7 +1168,7 @@ def _(
                     "regression_mode": cell_count_regression_mode_input.value,
                 }
             )
-    cell_count_pca_comparison = __import__("pandas").DataFrame(_corr_rows)
+    cell_count_pca_comparison = pd.DataFrame(_corr_rows)
 
     _positive_counts = np.clip(np.asarray(well_cell_counts, dtype=float), 1, None)
     _norm = _LogNorm(vmin=_positive_counts.min(), vmax=_positive_counts.max())
@@ -1078,6 +1218,8 @@ def _(
 def _(
     CONFIG,
     FIGS_DIR,
+    OVERWRITE_EXISTING_OUTPUTS,
+    RANDOM_STATE,
     RESULTS_DIR,
     X,
     X_cell_count_regressed,
@@ -1088,6 +1230,7 @@ def _(
     feat_cols,
     pd,
     plt,
+    write_csv_protected,
 ):
     _comparison_dir = RESULTS_DIR / "cell_count_regression_exploratory"
     _comparison_dir.mkdir(parents=True, exist_ok=True)
@@ -1107,7 +1250,7 @@ def _(
             pos_diffby=_diffby,
             neg_diffby=[CONFIG.treatment_col],
             null_size=1000,
-            seed=42,
+            seed=RANDOM_STATE,
             distance="cosine",
         )
         _map_rows.append(
@@ -1119,7 +1262,10 @@ def _(
                 "regression_mode": cell_count_regression_mode_input.value,
             }
         )
-        _map.to_csv(_comparison_dir / f"map_{_space}.csv", index=False)
+        _status = write_csv_protected(
+            _map, _comparison_dir / f"map_{_space}.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS
+        )
+        print(f"  ✓ PC mAP table for {_space}: {_status}")
 
     cell_count_regression_summary = pd.DataFrame(_map_rows)
     _baseline_map = float(
@@ -1130,8 +1276,17 @@ def _(
     cell_count_regression_summary["delta_mean_map_vs_original"] = (
         cell_count_regression_summary["mean_map"] - _baseline_map
     )
-    cell_count_regression_summary.to_csv(_comparison_dir / "map_summary.csv", index=False)
-    cell_count_pca_comparison.to_csv(_comparison_dir / "pca_cell_count_correlations.csv", index=False)
+    _summary_status = write_csv_protected(
+        cell_count_regression_summary, _comparison_dir / "map_summary.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    _pca_status = write_csv_protected(
+        cell_count_pca_comparison,
+        _comparison_dir / "pca_cell_count_correlations.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
+    print(f"  ✓ PC mAP comparison: {_summary_status}")
+    print(f"  ✓ PCA/cell-count correlation table: {_pca_status}")
 
     _fig, _ax = plt.subplots(figsize=(6.5, 4.5))
     _bars = _ax.bar(
@@ -1276,9 +1431,9 @@ def _(
     _qc_dimensions = min(N_PCA_COMPONENTS, X_pca.shape[1])
     _X_qc = X_pca[:, :_qc_dimensions]
     _qc_records = [
-        qc_record("all_wells", "plate", _X_qc, df[CONFIG.plate_col].values,
+        qc_record("all_wells", "plate", _X_qc, df[CONFIG.plate_col].to_numpy(),
                    permutations=N_QC_PERMUTATIONS, random_state=RANDOM_STATE),
-        qc_record("all_wells", "treatment", _X_qc, df[CONFIG.treatment_col].values,
+        qc_record("all_wells", "treatment", _X_qc, df[CONFIG.treatment_col].to_numpy(),
                    permutations=N_QC_PERMUTATIONS, random_state=RANDOM_STATE),
     ]
     if X_negcon_pca is not None:
@@ -1287,7 +1442,7 @@ def _(
         _qc_records.append(
             qc_record(
                 "negative_controls", "plate", _X_negcon_qc,
-                df.loc[negcon_mask, CONFIG.plate_col].values,
+                df.loc[negcon_mask, CONFIG.plate_col].to_numpy(),
                 permutations=N_QC_PERMUTATIONS, random_state=RANDOM_STATE,
             )
         )
@@ -1462,42 +1617,48 @@ def _(
 
     X_pca_combat = None
     if "combat" in RUN_ANALYSIS_SPACES:
-        try:
-            from inmoose.pycombat import pycombat_norm
-        except ImportError as _error:
-            raise ImportError(
-                "ComBat analysis was requested, but inmoose is not installed. "
-                "Add inmoose to the Pixi environment and rerun."
-            ) from _error
-
-        # pycombat_norm expects features (rows) x samples (columns) --
-        # transposed relative to X_pca's wells (rows) x PCs (columns).
-        _combat_batch = df[CONFIG.plate_col].astype(str).tolist()
-        _combat_raw = pycombat_norm(
-            X_pca.T,
-            _combat_batch,
-            mean_only=bool(combat_mean_only_input.value),
-            par_prior=bool(combat_par_prior_input.value),
-        )
-        X_pca_combat = np.asarray(_combat_raw).T
-
-        if X_pca_combat.shape != X_pca.shape:
-            raise ValueError(
-                f"Unexpected ComBat output shape. Input PCA shape: {X_pca.shape}, "
-                f"ComBat shape: {X_pca_combat.shape}"
+        _n_combat_batches = df[CONFIG.plate_col].nunique(dropna=False)
+        if _n_combat_batches < 2:
+            X_pca_combat = X_pca.copy()
+            print(
+                "ℹ Batch correction skipped: only one plate was detected. "
+                "ComBat cannot estimate a batch effect from one batch; uncorrected PCA "
+                "coordinates will be reused and no combat_coordinates.csv will be written."
             )
+        else:
+            try:
+                from inmoose.pycombat import pycombat_norm
+            except ImportError as _error:
+                raise ImportError(
+                    "ComBat analysis was requested, but inmoose is not installed. "
+                    "Add inmoose to the Pixi environment and rerun."
+                ) from _error
 
-        _combat_coordinates_df = pd.DataFrame(
-            X_pca_combat,
-            columns=[f"ComBat_PC{i + 1}" for i in range(X_pca_combat.shape[1])],
-            index=df.index,
-        )
-        _combat_coordinates_df = pd.concat([df[meta_cols], _combat_coordinates_df], axis=1)
-        _combat_path = validate_output_path(
-            SPACE_DIRECTORIES["combat"]["results"] / "combat_coordinates.csv", OVERWRITE_EXISTING_OUTPUTS
-        )
-        _status = write_csv_protected(_combat_coordinates_df, _combat_path, overwrite=OVERWRITE_EXISTING_OUTPUTS)
-        print(f"ComBat-corrected matrix: {X_pca_combat.shape} ({_status})")
+            _combat_batch = df[CONFIG.plate_col].astype(str).tolist()
+            _combat_raw = pycombat_norm(
+                X_pca.T, _combat_batch,
+                mean_only=bool(combat_mean_only_input.value),
+                par_prior=bool(combat_par_prior_input.value),
+            )
+            X_pca_combat = np.asarray(_combat_raw).T
+
+            if X_pca_combat.shape != X_pca.shape:
+                raise ValueError(
+                    f"Unexpected ComBat output shape. Input PCA shape: {X_pca.shape}, "
+                    f"ComBat shape: {X_pca_combat.shape}"
+                )
+
+            _combat_coordinates_df = pd.DataFrame(
+                X_pca_combat,
+                columns=[f"ComBat_PC{i + 1}" for i in range(X_pca_combat.shape[1])],
+                index=df.index,
+            )
+            _combat_coordinates_df = pd.concat([df[meta_cols], _combat_coordinates_df], axis=1)
+            _combat_path = SPACE_DIRECTORIES["combat"]["results"] / "combat_coordinates.csv"
+            _status = write_csv_protected(
+                _combat_coordinates_df, _combat_path, overwrite=OVERWRITE_EXISTING_OUTPUTS
+            )
+            print(f"ComBat-corrected matrix: {X_pca_combat.shape} ({_status})")
 
     MODELLING_SPACES = {
         "uncorrected": {
@@ -1536,8 +1697,8 @@ def _(mo):
     The same UMAP, LDA, leave-one-plate-out validation, clustering, and multivariate QC are run
     in both latent spaces via the shared `run_modelling_space` routine. Coordinates/models are
     kept in memory here (`directories=None`) so this notebook can re-export them with the full
-    metadata column set (including well identifiers), matching the original notebook's output
-    schema exactly rather than the shared routine's slimmer default metadata subset.
+    metadata column set (including well identifiers), so exported coordinates
+    remain traceable to the original wells.
     """)
     return
 
@@ -1566,7 +1727,7 @@ def _(
 ):
     def _export_with_full_metadata(values, columns, directories_key, filename, extra=None):
         """Re-export a coordinate/label array with the full Metadata_* column set
-        (+ "_dose_label"), matching the source notebook's output schema."""
+        (+ "_dose_label") so every row remains traceable to its condition."""
         out_df = df[meta_cols + ["_dose_label"]].copy()
         if extra is not None:
             for col, series in extra.items():
@@ -1728,20 +1889,38 @@ def _(mo):
     mo.md(r"""
     ## Section 7 — Interpretable phenotypic fingerprints
 
-    Fingerprints are calculated **once**, from the normalized CellProfiler features. Harmony
-    components are not mapped back to Intensity/Texture/AreaShape categories. Cohen's *d* is
-    calculated by experimental condition (Treatment x Concentration); each condition is compared
-    with negative controls, preferably combined within-plate.
+    The canonical interpretable fingerprint analysis now lives in
+    `05_phenotypic_fingerprints.py`. It uses the normalized CellProfiler
+    features directly, independently of the latent-space choice made here.
 
-    Detailed feature-level inspection and expanded radar analyses live in
-    `05_phenotypic_fingerprints.py`; this notebook retains only the compact overview needed to
-    contextualize the modelling results above (mirroring the source notebook's own scope note).
+    A compact legacy preview remains available for historical comparison, but
+    is disabled by default. Its outputs must not be treated as a substitute for
+    NB05's taxonomy coverage, control inventory, and complete fingerprint set.
     """)
     return
 
 
 @app.cell
-def _(CONFIG, df, negcon_mask, pd):
+def _(RUN_COMPACT_FINGERPRINT_PREVIEW, mo, print):
+    if not RUN_COMPACT_FINGERPRINT_PREVIEW:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**Compact fingerprint preview skipped.** Continue with NB05 after completing "
+                    "the NB04 modelling-space decision. NB05 is the canonical fingerprint workflow."
+                ),
+                kind="info",
+            ),
+        )
+    print("✓ Legacy compact fingerprint preview enabled")
+    compact_fingerprint_preview_gate = True
+    return (compact_fingerprint_preview_gate,)
+
+
+@app.cell
+def _(CONFIG, compact_fingerprint_preview_gate, df, negcon_mask, pd):
+    assert compact_fingerprint_preview_gate
     def format_concentration(value):
         try:
             return f"{float(value):g}"
@@ -2154,6 +2333,12 @@ def _(mo):
     mo.md(r"""
     ## Section 8b — Similarity Matrices for Profile Exploration
 
+    This advanced extension is optional and disabled by default. Enable
+    **Run advanced similarity and graph-clustering extensions** under
+    **Advanced analysis and output settings** when direct pairwise geometry,
+    alternative similarity metrics, or unsupervised graph structure is needed.
+    Sections 8b and 8c are exploratory and do not gate the core NB04 result.
+
     A similarity matrix turns the well-level feature matrix `X` into an
     n_wells × n_wells table of "how alike are these two profiles", making
     replicate agreement and treatment separation visible directly — no PCA/
@@ -2189,7 +2374,27 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(RUN_EXPLORATORY_EXTENSIONS, mo, print):
+    if not RUN_EXPLORATORY_EXTENSIONS:
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "**Advanced exploration skipped.** Sections 8b and 8c are disabled by "
+                    "default because they are computationally expensive and not required for "
+                    "the core profiling decision. Enable them in Advanced settings if needed."
+                ),
+                kind="info",
+            ),
+        )
+    print("✓ Advanced similarity and graph-clustering extensions enabled")
+    exploratory_extensions_gate = True
+    return (exploratory_extensions_gate,)
+
+
+@app.cell
+def _(exploratory_extensions_gate):
+    assert exploratory_extensions_gate
     import seaborn as sns
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import pdist, squareform
@@ -2215,7 +2420,8 @@ def _():
 
 
 @app.cell
-def _(FIGS_DIR, RESULTS_DIR):
+def _(FIGS_DIR, RESULTS_DIR, exploratory_extensions_gate):
+    assert exploratory_extensions_gate
     # Dedicated subdirectory (matching NB04's own comparisons/ and
     # fingerprints/ split) so this exploratory section's outputs never
     # collide with the modelling-space results already written above.
@@ -2306,7 +2512,8 @@ def _(LedoitWolf, cosine_similarity, np, pdist, rankdata, squareform):
 
 
 @app.cell
-def _(X, compute_similarity_matrix, np):
+def _(X, compute_similarity_matrix, exploratory_extensions_gate, np):
+    assert exploratory_extensions_gate
     SIMILARITY_METRICS = ["pearson", "cosine", "spearman", "euclidean", "mahalanobis"]
 
     similarity_matrices = {}
@@ -2349,7 +2556,8 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, df, mo):
+def _(CONFIG, df, exploratory_extensions_gate, mo):
+    assert exploratory_extensions_gate
     _candidate_columns = [
         getattr(CONFIG, "treatment_col", None),
         getattr(CONFIG, "concentration_col", None),
@@ -2387,7 +2595,7 @@ def _(CONFIG, df, mo):
 
 
 @app.cell
-def _(df, heatmap_annotations_input, heatmap_order_input, pd, sns):
+def _(categorical_palette, df, heatmap_annotations_input, heatmap_order_input, pd, sns):
     heatmap_order_column = (
         None if heatmap_order_input.value == "Hierarchical similarity" else heatmap_order_input.value
     )
@@ -2406,8 +2614,7 @@ def _(df, heatmap_annotations_input, heatmap_order_input, pd, sns):
                 return (1, _value.casefold())
 
         _levels = sorted(_values.unique(), key=_natural_key)
-        _palette_name = ("Set2", "Set3", "tab10", "husl")[_track_index % 4]
-        _colors = sns.color_palette(_palette_name, n_colors=len(_levels))
+        _colors = categorical_palette(len(_levels))
         _palette = dict(zip(_levels, _colors))
         heatmap_annotation_palettes[_column] = _palette
         heatmap_annotation_colors[_column] = _values.map(_palette)
@@ -2561,40 +2768,43 @@ def _(mo):
     mo.md(r"""
     ### 8b.2 — Metric Comparison
 
-    Do the five metrics actually agree on which wells are similar? A Mantel
-    test answers this directly: correlate the upper triangle of one
-    similarity matrix against another's (excluding the trivial diagonal),
-    which sidesteps re-deriving a joint embedding just to compare two
-    n × n structures on the same samples.
+    Do the five metrics agree on which wells are similar? We report the
+    descriptive Pearson correlation between the upper triangles of each pair
+    of similarity matrices (excluding the trivial diagonal).
+
+    These entries are not independent because each well occurs in many pairs,
+    so the analytical p-value from `pearsonr` would be invalid. This section
+    therefore reports the correlation coefficient only and does not call the
+    result a Mantel test.
     """)
     return
 
 
 @app.cell
-def _(pearsonr):
-    def mantel_correlation(matrix_a, matrix_b):
-        """Pearson r (+ p-value) between two similarity matrices' upper triangles."""
+def _(np, pearsonr):
+    def matrix_correlation(matrix_a, matrix_b):
+        """Descriptive Pearson r between two matrix upper triangles."""
         n = matrix_a.shape[0]
-        rows, cols = __import__("numpy").triu_indices(n, k=1)
-        r, p = pearsonr(matrix_a[rows, cols], matrix_b[rows, cols])
-        return float(r), float(p)
+        rows, cols = np.triu_indices(n, k=1)
+        r, _ = pearsonr(matrix_a[rows, cols], matrix_b[rows, cols])
+        return float(r)
 
-    return (mantel_correlation,)
+    return (matrix_correlation,)
 
 
 @app.cell
-def _(mantel_correlation, pd, similarity_matrices):
+def _(matrix_correlation, pd, similarity_matrices):
     _metric_names = list(similarity_matrices.keys())
     _rows = []
     for _i, _metric_a in enumerate(_metric_names):
         for _metric_b in _metric_names[_i + 1 :]:
-            _r, _p = mantel_correlation(similarity_matrices[_metric_a], similarity_matrices[_metric_b])
-            _rows.append({"metric_a": _metric_a, "metric_b": _metric_b, "mantel_r": _r, "p_value": _p})
+            _r = matrix_correlation(similarity_matrices[_metric_a], similarity_matrices[_metric_b])
+            _rows.append({"metric_a": _metric_a, "metric_b": _metric_b, "matrix_r": _r})
 
-    mantel_df = pd.DataFrame(_rows).sort_values("mantel_r", ascending=False).reset_index(drop=True)
-    print("Mantel correlation between similarity metrics (upper triangles):\n")
-    print(mantel_df.to_string(index=False))
-    return (mantel_df,)
+    matrix_correlation_df = pd.DataFrame(_rows).sort_values("matrix_r", ascending=False).reset_index(drop=True)
+    print("Descriptive correlation between similarity-matrix upper triangles:\n")
+    print(matrix_correlation_df.to_string(index=False))
+    return (matrix_correlation_df,)
 
 
 @app.cell
@@ -2634,7 +2844,7 @@ def _(
     df,
     fcluster,
     linkage,
-    mantel_df,
+    matrix_correlation_df,
     np,
     pd,
     similarity_matrices,
@@ -2645,13 +2855,13 @@ def _(
     for _metric, _sim in similarity_matrices.items():
         _off_diag = _sim[~np.eye(_sim.shape[0], dtype=bool)]
         if _metric == "pearson":
-            _mantel_vs_pearson = 1.0
+            _matrix_r_vs_pearson = 1.0
         else:
-            _match = mantel_df[
-                ((mantel_df["metric_a"] == "pearson") & (mantel_df["metric_b"] == _metric))
-                | ((mantel_df["metric_a"] == _metric) & (mantel_df["metric_b"] == "pearson"))
+            _match = matrix_correlation_df[
+                ((matrix_correlation_df["metric_a"] == "pearson") & (matrix_correlation_df["metric_b"] == _metric))
+                | ((matrix_correlation_df["metric_a"] == _metric) & (matrix_correlation_df["metric_b"] == "pearson"))
             ]
-            _mantel_vs_pearson = float(_match["mantel_r"].iloc[0]) if len(_match) else np.nan
+            _matrix_r_vs_pearson = float(_match["matrix_r"].iloc[0]) if len(_match) else np.nan
 
         _distance = 1.0 - _sim
         np.fill_diagonal(_distance, 0.0)
@@ -2664,7 +2874,7 @@ def _(
                 "min": float(_off_diag.min()),
                 "max": float(_off_diag.max()),
                 "mean": float(_off_diag.mean()),
-                "mantel_r_vs_pearson": _mantel_vs_pearson,
+                "matrix_r_vs_pearson": _matrix_r_vs_pearson,
                 f"n_clusters_at_k={_n_treatments}": len(np.unique(_clusters)),
             }
         )
@@ -2692,7 +2902,7 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, X, df, np):
+def _(CONFIG, RANDOM_STATE, X, df, np):
     from hca_pipeline.metrics_qc import null_distribution_batch_aware
 
     null_dist = null_distribution_batch_aware(
@@ -2700,7 +2910,7 @@ def _(CONFIG, X, df, np):
         df[CONFIG.treatment_col].to_numpy(),
         plate_labels=df[CONFIG.plate_col].to_numpy(),
         n_pairs=10_000,
-        seed=42,  # same seed convention as every other notebook in this pipeline
+        seed=RANDOM_STATE,
     )
     if len(null_dist) == 0:
         print(
@@ -2893,12 +3103,12 @@ def _(
         _labels = df[CONFIG.treatment_col].to_numpy()
         _intra_median = {}
         for _label in _map_by_treatment.index:
-            _idx = __import__("numpy").where(_labels == _label)[0]
+            _idx = np.where(_labels == _label)[0]
             if len(_idx) < 2:
                 continue
-            _sub = _pearson[__import__("numpy").ix_(_idx, _idx)]
-            _upper = _sub[__import__("numpy").triu_indices(len(_idx), k=1)]
-            _intra_median[_label] = float(__import__("numpy").median(_upper))
+            _sub = _pearson[np.ix_(_idx, _idx)]
+            _upper = _sub[np.triu_indices(len(_idx), k=1)]
+            _intra_median[_label] = float(np.median(_upper))
 
         _common = sorted(set(_map_by_treatment.index) & set(_intra_median.keys()))
         if _common:
@@ -2937,21 +3147,26 @@ def _(
     OVERWRITE_EXISTING_OUTPUTS,
     SIMILARITY_RESULTS_DIR,
     df,
-    mantel_df,
+    matrix_correlation_df,
     metric_summary_df,
+    pd,
     pr_simplified_df,
     similarity_matrices,
     write_csv_protected,
 ):
     _well_ids = df.index.astype(str)
     for _metric, _sim in similarity_matrices.items():
-        _sim_df = __import__("pandas").DataFrame(_sim, index=_well_ids, columns=_well_ids)
+        _sim_df = pd.DataFrame(_sim, index=_well_ids, columns=_well_ids)
         _status = write_csv_protected(
             _sim_df, SIMILARITY_RESULTS_DIR / f"{_metric}_matrix.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS,
         )
         print(f"  {_metric:<12} matrix {_status}")
 
-    write_csv_protected(mantel_df, SIMILARITY_RESULTS_DIR / "mantel_comparison.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
+    write_csv_protected(
+        matrix_correlation_df,
+        SIMILARITY_RESULTS_DIR / "matrix_correlation_comparison.csv",
+        overwrite=OVERWRITE_EXISTING_OUTPUTS,
+    )
     write_csv_protected(metric_summary_df, SIMILARITY_RESULTS_DIR / "metric_summary.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
     write_csv_protected(pr_simplified_df, SIMILARITY_RESULTS_DIR / "percent_replicating_simplified.csv", overwrite=OVERWRITE_EXISTING_OUTPUTS)
     print(f"✓ Saved similarity-matrix artifacts to {SIMILARITY_RESULTS_DIR}")
@@ -2961,6 +3176,7 @@ def _(
 @app.cell
 def _(
     CONFIG,
+    INPUT_PARQUET,
     REPO_ROOT,
     SIMILARITY_RESULTS_DIR,
     X,
@@ -2970,8 +3186,13 @@ def _(
     pearson_cosine_equivalence_r,
     similarity_matrices,
     subprocess,
-    validate_output_path,
+    print,
 ):
+    from hca_pipeline.provenance import (
+        canonicalize_provenance as _canonicalize_provenance,
+        provenance_json as _provenance_json,
+    )
+
     try:
         _git_hash = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(REPO_ROOT),
@@ -2989,9 +3210,22 @@ def _(
         "metrics_computed": list(similarity_matrices.keys()),
         "pearson_cosine_equivalence_r": pearson_cosine_equivalence_r,
     }
-    _path = validate_output_path(SIMILARITY_RESULTS_DIR / "provenance.json", overwrite=True)
-    _path.write_text(json.dumps(_provenance, indent=2), encoding="utf-8")
-    print(f"✓ Provenance: {_path}")
+    _provenance = _canonicalize_provenance(
+        _provenance,
+        notebook="04_phenotypic_profiling.py#section-8b",
+        experiment_id=CONFIG.experiment_id,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=sorted(SIMILARITY_RESULTS_DIR.glob("*.csv")),
+    )
+    _payload = _provenance_json(_provenance)
+    _path = SIMILARITY_RESULTS_DIR / "provenance.json"
+    if _path.exists() and not CONFIG.overwrite_existing_outputs:
+        print(f"✓ Provenance unchanged (existing file protected): {_path}")
+    else:
+        _status = "replaced" if _path.exists() else "created"
+        _path.write_text(_payload, encoding="utf-8")
+        print(f"✓ Provenance {_status}: {_path}")
     return
 
 
@@ -3002,7 +3236,7 @@ def _(mo):
 
     Produced: 5 similarity matrices (CSV), 2 clustermaps + a 3-panel metric
     comparison + an intra/inter-treatment boxplot + a Pearson/cosine
-    equivalence scatter (PNG/SVG), a Mantel comparison table, a per-metric
+    equivalence scatter (PNG/SVG), a descriptive matrix-correlation table, a per-metric
     summary table, and a simplified percent-replicating table — all under
     `results/similarity_matrices/` and `figures/phenotypic_profiling/similarity_matrices/`.
     This is exploratory and does not gate NB04's own integrity checks below.
@@ -3050,7 +3284,8 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(exploratory_extensions_gate, mo):
+    assert exploratory_extensions_gate
     graph_knn_neighbors_input = mo.ui.number(
         value=15, start=3, stop=50, label="k-NN graph / manifold n_neighbors"
     )
@@ -3073,7 +3308,8 @@ def _(mo):
 
 
 @app.cell
-def _(FIGS_DIR, RESULTS_DIR):
+def _(FIGS_DIR, RESULTS_DIR, exploratory_extensions_gate):
+    assert exploratory_extensions_gate
     # Dedicated subdirectory (matching Section 8b's own similarity_matrices/
     # split) so this diagnostic section's outputs never collide with the
     # modelling-space results written above.
@@ -3085,7 +3321,8 @@ def _(FIGS_DIR, RESULTS_DIR):
 
 
 @app.cell
-def _():
+def _(exploratory_extensions_gate):
+    assert exploratory_extensions_gate
     # All third-party names this section needs, imported once (mirroring
     # Section 8b's own "imports for this section" cell) — marimo requires
     # every name to be defined in exactly one cell, so each subsequent cell
@@ -3129,8 +3366,9 @@ def _(
     # Section 8b's similarity matrices as-is (shifted from [-1, 1] to [0, 1]
     # since spectral clustering requires a nonnegative affinity) rather than
     # recomputing them a second time.
+    _n_neighbors = min(int(graph_knn_neighbors_input.value), max(1, X.shape[0] - 1))
     _knn_graph = kneighbors_graph(
-        X, n_neighbors=int(graph_knn_neighbors_input.value), mode="connectivity", include_self=False,
+        X, n_neighbors=_n_neighbors, mode="connectivity", include_self=False,
     )
     # kneighbors_graph is directed (asymmetric); symmetrize into an
     # undirected affinity graph, which is what spectral clustering expects.
@@ -3144,6 +3382,10 @@ def _(
         "pearson": (similarity_matrices["pearson"] + 1) / 2,
     }
     print(f"Affinity matrices built: {list(graph_affinities.keys())}")
+    if _n_neighbors != int(graph_knn_neighbors_input.value):
+        print(
+            f"ℹ k-NN neighbors reduced to {_n_neighbors} because only {X.shape[0]} wells are available."
+        )
     return (graph_affinities,)
 
 
@@ -3166,8 +3408,11 @@ def _(
 ):
     _treatment_labels = df[CONFIG.treatment_col].astype(str).to_numpy()
 
+    import warnings as _warnings
+
     _rows = []
-    for _k in range(2, int(graph_k_max_input.value) + 1):
+    _max_supported_k = min(int(graph_k_max_input.value), X.shape[0] - 1)
+    for _k in range(2, _max_supported_k + 1):
         _km_labels = KMeans(n_clusters=_k, random_state=RANDOM_STATE, n_init=10).fit_predict(X)
         _rows.append(
             {
@@ -3180,9 +3425,12 @@ def _(
             }
         )
         for _affinity_name, _affinity in graph_affinities.items():
-            _sc_labels = SpectralClustering(
-                n_clusters=_k, random_state=RANDOM_STATE, affinity="precomputed", assign_labels="kmeans",
-            ).fit_predict(_affinity)
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", category=UserWarning)
+                _sc_labels = SpectralClustering(
+                    n_clusters=_k, random_state=RANDOM_STATE,
+                    affinity="precomputed", assign_labels="kmeans",
+                ).fit_predict(_affinity)
             if len(np.unique(_sc_labels)) < 2:
                 # Degenerate solution (e.g. RBF collapsing to fewer real
                 # clusters than requested) -- not a valid clustering to score.
@@ -3201,6 +3449,11 @@ def _(
     clustering_comparison_df = pd.DataFrame(_rows)
     print("Spectral clustering vs. KMeans, across affinities and k:\n")
     print(clustering_comparison_df.round(4).to_string(index=False))
+    print(
+        "ℹ Spectral graph-connectivity warnings are summarized rather than emitted repeatedly. "
+        "A disconnected graph or fewer realized clusters means that affinity/k is unstable for "
+        "these data; it is an exploratory limitation, not a pipeline failure."
+    )
     return (clustering_comparison_df,)
 
 
@@ -3218,7 +3471,7 @@ def _(
     # Representative k for the stability check (the sweep above already
     # covers k's effect on cluster quality; this asks a different question —
     # holding k fixed, how much does the clustering change under resampling?).
-    _k_stability = 6
+    _k_stability = min(6, max(2, X.shape[0] - 1))
     _n = X.shape[0]
     _n_boot = int(graph_n_bootstrap_input.value)
     _rng = np.random.RandomState(RANDOM_STATE)
@@ -3240,11 +3493,15 @@ def _(
 
     for _affinity_mode, _method_name in [("rbf", "spectral_rbf"), ("nearest_neighbors", "spectral_knn_graph")]:
         try:
-            _mean_ari, _std_ari = _bootstrap_stability(
-                lambda Z, _mode=_affinity_mode: SpectralClustering(
-                    n_clusters=_k_stability, random_state=RANDOM_STATE, affinity=_mode,
-                ).fit_predict(Z)
-            )
+            import warnings as _warnings
+
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                _mean_ari, _std_ari = _bootstrap_stability(
+                    lambda Z, _mode=_affinity_mode: SpectralClustering(
+                        n_clusters=_k_stability, random_state=RANDOM_STATE, affinity=_mode,
+                    ).fit_predict(Z)
+                )
         except Exception as exc:
             print(f"  ⚠️  Stability check for {_method_name} failed: {exc!r}")
             _mean_ari, _std_ari = float("nan"), float("nan")
@@ -3337,8 +3594,7 @@ def _(CONFIG, GRAPH_CLUSTERING_FIGS_DIR, X, cosine_similarity, df, pd, plt):
     # average out to well-separated points, that supports discrete clusters;
     # if consensus profiles instead grade smoothly into each other (or sit at
     # opposite poles of a shared axis), that supports a continuum instead --
-    # exactly the framing NB07's recovery axis already uses for this
-    # dataset's dormancy/recovery design.
+    # a shared biological continuum rather than unrelated discrete groups.
     _pca_df = pd.DataFrame(X, columns=[f"pc{i}" for i in range(X.shape[1])])
     _pca_df[CONFIG.treatment_col] = df[CONFIG.treatment_col].astype(str).to_numpy()
     _consensus = _pca_df.groupby(CONFIG.treatment_col).mean()
@@ -3444,19 +3700,11 @@ def _(
       consistent with a **continuum** between opposite phenotypic poles rather than
       unrelated, independently-scattered clusters.
 
-    **Recommendation for this dataset:** graph-based clustering and manifold learning
-    do not provide a decisive win over the existing PCA + KMeans / LDA-based
-    workflow — RBF-affinity spectral clustering in particular is prone to
-    degenerate, unstable solutions here (see the k-sweep and bootstrap-stability
-    tables above), and manifold learning (UMAP/Isomap/LLE) improves visual
-    separability without proportionally improving agreement with treatment
-    identity. The more actionable finding is structural, not algorithmic: this
-    dataset's dormancy/recovery design looks better described by a **continuum**
-    (as NB07's geometric recovery axis already models) than by forcing it into
-    discrete clusters, whichever clustering algorithm is used. Kept as a
-    diagnostic section — re-run it on other experiments before assuming this
-    verdict transfers; a dataset with more/tighter treatment clusters could
-    show a different, more favorable balance for spectral clustering.
+    **How to use this diagnostic:** prefer the method that combines separation
+    with bootstrap stability; do not choose an embedding only because its plot
+    looks cleaner. Weak or unstable discrete clusters may indicate overlapping
+    phenotypes or a continuous response, and are not by themselves evidence of
+    experimental failure. This section is advisory and does not gate NB04.
     """
     )
     return
@@ -3496,6 +3744,7 @@ def _(
 def _(
     CONFIG,
     GRAPH_CLUSTERING_RESULTS_DIR,
+    INPUT_PARQUET,
     REPO_ROOT,
     X,
     best_k_kmeans,
@@ -3507,8 +3756,13 @@ def _(
     kmeans_stability,
     spectral_rbf_stability,
     subprocess,
-    validate_output_path,
+    print,
 ):
+    from hca_pipeline.provenance import (
+        canonicalize_provenance as _canonicalize_provenance,
+        provenance_json as _provenance_json,
+    )
+
     try:
         _git_hash = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(REPO_ROOT),
@@ -3529,9 +3783,22 @@ def _(
         "kmeans_stability": kmeans_stability,
         "spectral_rbf_stability": spectral_rbf_stability,
     }
-    _path = validate_output_path(GRAPH_CLUSTERING_RESULTS_DIR / "provenance.json", overwrite=True)
-    _path.write_text(json.dumps(_provenance, indent=2), encoding="utf-8")
-    print(f"✓ Provenance: {_path}")
+    _provenance = _canonicalize_provenance(
+        _provenance,
+        notebook="04_phenotypic_profiling.py#section-8c",
+        experiment_id=CONFIG.experiment_id,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=sorted(GRAPH_CLUSTERING_RESULTS_DIR.glob("*.csv")),
+    )
+    _payload = _provenance_json(_provenance)
+    _path = GRAPH_CLUSTERING_RESULTS_DIR / "provenance.json"
+    if _path.exists() and not CONFIG.overwrite_existing_outputs:
+        print(f"✓ Provenance unchanged (existing file protected): {_path}")
+    else:
+        _status = "replaced" if _path.exists() else "created"
+        _path.write_text(_payload, encoding="utf-8")
+        print(f"✓ Provenance {_status}: {_path}")
     return
 
 
@@ -3548,15 +3815,17 @@ def _(
     COMPARISON_FIGURES_DIR,
     COMPARISON_RESULTS_DIR,
     CONFIG,
+    FEATURE_SCALING,
     FINAL_MODELLING_SPACE,
-    FINGERPRINT_USE_WITHIN_PLATE_EFFECTS,
+    INPUT_PARQUET,
     MODELLING_SPACES,
     OVERWRITE_EXISTING_OUTPUTS,
     REPO_ROOT,
     RUN_ANALYSIS_SPACES,
+    RUN_COMPACT_FINGERPRINT_PREVIEW,
+    RUN_EXPLORATORY_EXTENSIONS,
     SPACE_DIRECTORIES,
     X_pca,
-    condition_order,
     datetime,
     df,
     feat_cols,
@@ -3569,6 +3838,11 @@ def _(
     subprocess,
     validate_output_path,
 ):
+    from hca_pipeline.provenance import (
+        canonicalize_provenance as _canonicalize_provenance,
+        provenance_json as _provenance_json,
+    )
+
     try:
         _git_hash = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(REPO_ROOT),
@@ -3583,31 +3857,39 @@ def _(
         "git_hash": _git_hash,
         "n_wells": int(df.shape[0]),
         "n_cellprofiler_features": int(len(feat_cols)),
+        "feature_scaling": FEATURE_SCALING,
         "latent_dimensions": int(X_pca.shape[1]),
         "run_analysis_spaces": RUN_ANALYSIS_SPACES,
+        "run_exploratory_extensions": RUN_EXPLORATORY_EXTENSIONS,
         "final_modelling_space": FINAL_MODELLING_SPACE,
         "automated_recommendation": recommendation,
         "recommendation_confidence": recommendation_confidence,
         "recommended_primary_space": recommended_primary_space,
-        "fingerprints_source": "normalized original CellProfiler features",
-        "fingerprint_condition_definition": "Treatment x Concentration",
-        "fingerprint_effect_method": (
-            "within-plate weighted Cohen's d" if FINGERPRINT_USE_WITHIN_PLATE_EFFECTS else "global Cohen's d"
-        ),
-        "n_fingerprint_conditions": len(condition_order),
+        "compact_fingerprint_preview": RUN_COMPACT_FINGERPRINT_PREVIEW,
+        "canonical_fingerprint_notebook": "05_phenotypic_fingerprints.py",
     }
 
     _timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S%f")
 
     def _write_with_optional_history(directory, payload):
+        _output_files = sorted(directory.glob("*.csv")) + sorted(directory.glob("*.parquet"))
+        payload = _canonicalize_provenance(
+            payload,
+            notebook="04_phenotypic_profiling.py",
+            experiment_id=CONFIG.experiment_id,
+            repo_root=REPO_ROOT,
+            dependencies=[INPUT_PARQUET],
+            outputs=_output_files,
+        )
+        _payload_text = _provenance_json(payload)
         _path = directory / "provenance.json"
         if _path.exists() and not OVERWRITE_EXISTING_OUTPUTS:
             print(f"  ↳ {directory.name}/provenance.json unchanged")
         else:
-            _path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            _path.write_text(_payload_text, encoding="utf-8")
         if CONFIG.save_provenance_history:
             _history_path = directory / f"provenance_{_timestamp}.json"
-            _history_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            _history_path.write_text(_payload_text, encoding="utf-8")
 
     for _space_name in RUN_ANALYSIS_SPACES:
         _provenance = {
@@ -3626,6 +3908,7 @@ def _(
         "comparison_figures_dir": str(COMPARISON_FIGURES_DIR),
     }
     _write_with_optional_history(COMPARISON_RESULTS_DIR, _comparison_provenance)
+    print("Provenance schema           : v2 with SHA-256 dependency/output records")
     print(f"Historical record           : {'enabled' if CONFIG.save_provenance_history else 'disabled'}")
 
     print("═" * 72)
@@ -3634,7 +3917,8 @@ def _(
     print(f"Spaces run                 : {', '.join(RUN_ANALYSIS_SPACES)}")
     print(f"Automated recommendation    : {recommendation}")
     print(f"Explicit final space        : {FINAL_MODELLING_SPACE}")
-    print(f"Fingerprint conditions      : {len(condition_order)}")
+    print(f"Exploratory extensions      : {'completed' if RUN_EXPLORATORY_EXTENSIONS else 'skipped by configuration'}")
+    print(f"Fingerprint workflow        : NB05 canonical; NB04 preview {'completed' if RUN_COMPACT_FINGERPRINT_PREVIEW else 'skipped'}")
     print(f"Comparison results          : {COMPARISON_RESULTS_DIR}")
     print(f"Comparison figures          : {COMPARISON_FIGURES_DIR}")
     return
@@ -3651,7 +3935,6 @@ def _(mo):
 @app.cell
 def _(
     COMPARISON_RESULTS_DIR,
-    FINGERPRINT_RESULTS_DIR,
     RUN_ANALYSIS_SPACES,
     SPACE_DIRECTORIES,
     analysis_results,
@@ -3674,9 +3957,6 @@ def _(
         _integrity_errors.append("Missing comparisons/uncorrected_vs_harmony_summary.csv")
     if not (COMPARISON_RESULTS_DIR / "provenance.json").exists():
         _integrity_errors.append("Missing comparisons/provenance.json")
-    if not (FINGERPRINT_RESULTS_DIR / "cohens_d_by_condition_long.csv").exists():
-        _integrity_errors.append("Missing fingerprints/cohens_d_by_condition_long.csv")
-
     if set(comparison_df.index) != set(RUN_ANALYSIS_SPACES):
         _integrity_errors.append("comparison_df space index does not match RUN_ANALYSIS_SPACES.")
 
@@ -3698,47 +3978,25 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Save the notebook's **current session** without rerunning cells. HTML
+    preserves rich outputs and expanded details; PDF provides a clean reading
+    copy without code. Chromium can save both directly to the experiment's
+    `reports/` folder after authorization. Safari provides separate downloads.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_04_phenotypic_profiling",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 

@@ -8,7 +8,12 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
@@ -26,8 +31,8 @@ def _(mo):
 
     ## Input and output
 
-    **Accepted raw inputs:** CellProfiler SQLite database(s), or one legacy
-    merged single-cell CSV
+    **Accepted raw inputs:** CellProfiler SQLite database(s), CellProfiler
+    table CSVs, or one legacy merged single-cell CSV
     **Primary output:** `single_cell_profiles.parquet`
     **Interoperability output:** `single_cell_profiles.csv`
     **QC outputs:** cell-count table, plate maps, feature-integrity report
@@ -36,7 +41,7 @@ def _(mo):
     ## Execution logic
 
     1. Configure the experiment (widgets below) and validate the choice.
-    2. Discover the available raw input and report what will be used.
+    2. Locate and read the experiment input.
     3. Reconstruct the plate-level datasets.
     4. Run blocking structural validations (SC-01 → SC-03).
     5. Report non-blocking cell-count QC findings (SC-04).
@@ -70,7 +75,6 @@ def _():
     import json
     import platform
     import re
-    import sqlite3
     import subprocess
     from dataclasses import replace
     from datetime import datetime, timezone
@@ -97,14 +101,13 @@ def _():
         plt,
         re,
         replace,
-        sqlite3,
         subprocess,
         timezone,
     )
 
 
 @app.cell
-def _(Path):
+def _(Path, mo, print):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
     # workspace). __file__ is used instead of cwd so this notebook
@@ -137,6 +140,9 @@ def _(Path):
         validate_configuration,
     )
     from hca_pipeline.io import (
+        discover_single_cell_inputs,
+        read_cellprofiler_csvs,
+        read_cellprofiler_sqlite,
         write_parquet_protected,
         write_csv_protected,
         write_summary_table_protected,
@@ -151,7 +157,16 @@ def _(Path):
     )
     from hca_pipeline.feature_select import infer_feature_cols
 
-    print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
+    mo.callout(
+        mo.md(
+            f"""
+            ### Shared utilities ready
+
+            ✅ Loaded `hca_pipeline` from `{_pipelines_dir}`.
+            """
+        ),
+        kind="success",
+    )
     return (
         COMPARTMENT_PREFIXES,
         ExperimentConfig,
@@ -159,10 +174,13 @@ def _(Path):
         SUPPORTED_PLATE_FORMATS,
         add_cell_count_metadata,
         dedupe_meta,
+        discover_single_cell_inputs,
         ensure_core_metadata,
         infer_feature_cols,
         norm_well,
         read_barcode_platemap,
+        read_cellprofiler_csvs,
+        read_cellprofiler_sqlite,
         read_platemap_layout,
         validate_configuration,
         write_csv_protected,
@@ -176,11 +194,10 @@ def _(mo):
     mo.md(r"""
     ## 1 — Experiment configuration
 
-    Pick the experiment folder and confirm the plate geometry and QC
-    threshold. Defaults are pre-filled from a previously saved
-    `experiment_config.json` when one exists, so re-running this
-    notebook (or moving on to later pipeline steps) doesn't require
-    re-entering the same choices.
+    Select the experiment to analyze. Previously saved settings are loaded
+    automatically. Plate geometry, QC thresholds, channels, and output
+    protection remain available under **Advanced settings** when they need
+    to be reviewed or changed.
     """)
     return
 
@@ -233,7 +250,7 @@ def _(SUPPORTED_PLATE_FORMATS, loaded_config, mo):
     image_root_input = mo.ui.text(
         value=loaded_config.image_root or "",
         label="Raw image directory, relative to repo root (leave blank if none — "
-        "00_image_quality.py self-skips without this)",
+        "extras/image_quality.py self-skips without this)",
     )
     overwrite_input = mo.ui.checkbox(
         value=loaded_config.overwrite_existing_outputs,
@@ -243,17 +260,24 @@ def _(SUPPORTED_PLATE_FORMATS, loaded_config, mo):
         value=loaded_config.save_provenance_history,
         label="Save timestamped provenance history",
     )
-    mo.vstack(
-        [
-            plate_format_input,
-            min_cells_input,
-            channels_input,
-            image_root_input,
-            overwrite_input,
-            save_history_input,
-        ]
+    advanced_settings = mo.accordion(
+        {
+            "Advanced settings": mo.vstack(
+                [
+                    plate_format_input,
+                    min_cells_input,
+                    channels_input,
+                    image_root_input,
+                    overwrite_input,
+                    save_history_input,
+                ],
+                gap=1,
+            )
+        }
     )
+    advanced_settings
     return (
+        advanced_settings,
         channels_input,
         image_root_input,
         min_cells_input,
@@ -276,6 +300,7 @@ def _(
     replace,
     save_history_input,
     validate_configuration,
+    mo,
 ):
     EXPERIMENT_ID = experiment_id_input.value
     PLATE_FORMAT = int(plate_format_input.value)
@@ -301,21 +326,29 @@ def _(
     )
     _config_path = CONFIG.save(REPO_ROOT)
 
-    print("═" * 72)
-    print("CONFIGURATION VALIDATED")
-    print("═" * 72)
-    print(f"  Experiment ID:       {EXPERIMENT_ID}")
-    print(f"  Plate format:        {PLATE_FORMAT}-well")
-    print(f"  Minimum cells/well:  {MIN_CELLS_PER_WELL}")
-    print(f"  Channels:            {', '.join(CONFIG.channels) or '(none selected)'}")
-    print(f"  Image root:          {CONFIG.image_root or '(none — image QC disabled)'}")
-    print(f"  Repository root:     {REPO_ROOT}")
-    print(f"  Saved config:        {_config_path}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### Configuration validated
+
+            | Setting | Current value |
+            |---|---|
+            | Experiment ID | `{EXPERIMENT_ID}` |
+            | Plate format | **{PLATE_FORMAT}-well** |
+            | Minimum cells per well | **{MIN_CELLS_PER_WELL:,}** |
+            | Channels | {', '.join(CONFIG.channels) or 'none selected'} |
+            | Image QC | {f'`{CONFIG.image_root}`' if CONFIG.image_root else 'disabled (no image root)'} |
+            | Repository | `{REPO_ROOT}` |
+            | Saved configuration | `{_config_path}` |
+            """
+        ),
+        kind="success",
+    )
     return CONFIG, EXPERIMENT_ID, MIN_CELLS_PER_WELL, PLATE_FORMAT
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, mo):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
     PROFILES_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID
@@ -332,8 +365,18 @@ def _(EXPERIMENT_ID, REPO_ROOT):
     for _directory in (OUTPUT_DIR, RESULTS_DIR, FIGS_DIR):
         _directory.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Database directory:  {DB_ROOT}")
-    print(f"  Analysis directory:  {ANALYSIS_DIR}")
+    mo.callout(
+        mo.md(
+            f"""
+            ### Experiment paths ready
+
+            - Input directory: `{DB_ROOT}`
+            - Analysis directory: `{ANALYSIS_DIR}`
+            - Output directory: `{OUTPUT_DIR}`
+            """
+        ),
+        kind="info",
+    )
     return (
         COUNTS_CSV,
         DB_ROOT,
@@ -350,87 +393,102 @@ def _(mo):
     mo.md(r"""
     ## 2 — Locate and validate the experiment input
 
-    The notebook accepts CellProfiler SQLite databases (`.db`, `.sqlite`,
-    `.sqlite3`), one merged single-cell CSV, the four CellProfiler `Per_*`
-    table CSVs, or an existing NB01 parquet as a resume source.
+    The notebook automatically recognizes CellProfiler SQLite databases
+    (`.db`, `.sqlite`, `.sqlite3`), a merged single-cell CSV, a set of
+    CellProfiler table CSVs, or an existing NB01 parquet checkpoint.
 
-    `single_cell_profiles.parquet` is the **first output of this notebook**.
-    It is therefore completely normal for it not to exist on the first run;
-    its absence is reported as information, never as an input error.
+    Not finding the parquet is **normal on the first run**. Raw SQLite/CSV
+    inputs are preferred; the parquet is used only when no raw input exists.
     """)
     return
 
 
 @app.cell
-def _(DB_ROOT, OUTPUT_PARQUET, mo):
-    _candidate_databases = sorted(
-        p
-        for pattern in ("*.db", "*.sqlite", "*.sqlite3")
-        for p in DB_ROOT.glob(pattern)
-    ) if DB_ROOT.is_dir() else []
-    _candidate_csvs = sorted(DB_ROOT.glob("*.csv")) if DB_ROOT.is_dir() else []
-
-    if _candidate_databases:
-        INPUT_KIND = "sqlite"
-        INPUT_FILES = _candidate_databases
-        _source_message = (
-            f"Found **{len(INPUT_FILES)} CellProfiler database(s)**. "
-            "They will be merged into one single-cell table."
-        )
-    elif _candidate_csvs:
-        INPUT_KIND = "csv"
-        INPUT_FILES = _candidate_csvs
-        _source_message = (
-            "Found **one merged CSV**." if len(INPUT_FILES) == 1 else
-            f"Found **{len(INPUT_FILES)} CSV files**; looking for CellProfiler `Per_*` tables."
-        )
-    elif OUTPUT_PARQUET.exists():
-        INPUT_KIND = "parquet"
-        INPUT_FILES = [OUTPUT_PARQUET]
-        _source_message = "No raw input was found; resuming from the **existing NB01 parquet**."
-    else:
-        INPUT_KIND = "missing"
-        INPUT_FILES = []
-        _source_message = (
-            f"No CellProfiler database or legacy CSV was found in `{DB_ROOT}`."
-        )
-
-    _parquet_message = (
-        f"An earlier output exists at `{OUTPUT_PARQUET}`; it will be protected "
-        "from silent overwrite."
-        if OUTPUT_PARQUET.exists()
-        else "No previous parquet exists yet — this is the expected state on the first run."
+def _(DB_ROOT, OUTPUT_PARQUET, discover_single_cell_inputs, mo):
+    DISCOVERED_INPUTS = discover_single_cell_inputs(
+        DB_ROOT,
+        previous_parquet=OUTPUT_PARQUET,
     )
-    _kind = "success" if INPUT_KIND in {"sqlite", "csv", "parquet"} else "danger"
-    _discovery_callout = mo.callout(
-        mo.md(
-            f"**Input discovery**\n\n{_source_message}\n\n"
-            f"**Output checkpoint**\n\n{_parquet_message}"
-        ),
-        kind=_kind,
+    if DISCOVERED_INPUTS["sqlite"]:
+        INPUT_KIND = "sqlite"
+        INPUT_PATHS = DISCOVERED_INPUTS["sqlite"]
+    elif DISCOVERED_INPUTS["csv"]:
+        INPUT_KIND = "csv"
+        INPUT_PATHS = DISCOVERED_INPUTS["csv"]
+    elif DISCOVERED_INPUTS["parquet"]:
+        INPUT_KIND = "parquet"
+        INPUT_PATHS = DISCOVERED_INPUTS["parquet"]
+    else:
+        INPUT_KIND = None
+        INPUT_PATHS = []
+
+    _parquet_status = (
+        f"found: `{OUTPUT_PARQUET.name}`"
+        if DISCOVERED_INPUTS["parquet"]
+        else "not found — normal for the first run"
+    )
+    _source_lines = "\n".join(f"- `{path.name}`" for path in INPUT_PATHS) or "- none"
+    _status = mo.md(
+        f"""
+        ### Input discovery
+
+        - SQLite databases: **{len(DISCOVERED_INPUTS['sqlite'])}**
+        - CSV files: **{len(DISCOVERED_INPUTS['csv'])}**
+        - Previous parquet: **{_parquet_status}**
+        - Selected source: **{INPUT_KIND or 'none'}**
+
+        Files selected:
+        {_source_lines}
+        """
     )
     mo.stop(
-        INPUT_KIND == "missing",
-        mo.vstack(
-            [
-                _discovery_callout,
-                mo.callout(
-                    mo.md(
-                        "Add CellProfiler SQLite (`.db`, `.sqlite`, `.sqlite3`), a merged "
-                        "CSV, or the four `Per_*` CSV tables to "
-                        f"`{DB_ROOT}`, then rerun this cell."
-                    ),
-                    kind="danger",
-                ),
-            ]
+        INPUT_KIND is None,
+        mo.callout(
+            mo.md(
+                f"No supported input was found in `{DB_ROOT}`. Add a CellProfiler "
+                "SQLite database (`.db`, `.sqlite`, `.sqlite3`), a merged profile CSV, "
+                "or the four `Per_*` CSV tables, then rerun this cell."
+            ),
+            kind="danger",
         ),
     )
-    _discovery_callout
-    return INPUT_FILES, INPUT_KIND
+    _status
+    return DISCOVERED_INPUTS, INPUT_KIND, INPUT_PATHS
 
 
 @app.cell
-def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd, sqlite3):
+def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd, print):
+    def prepare_single_cell_profiles(df: pd.DataFrame, source_label: str) -> pd.DataFrame:
+        """Standardize and validate profiles loaded from any supported format."""
+        if df.empty:
+            raise ValueError(f"{source_label}: the input contains no rows.")
+        print(f"  Raw data:  {len(df):,} rows × {df.shape[1]:,} columns")
+        unnamed_columns = [c for c in df.columns if str(c).startswith("Unnamed:")]
+        df = df.drop(columns=unnamed_columns, errors="ignore")
+        df = ensure_core_metadata(df)
+        df = dedupe_meta(df)
+        required_metadata = ["Metadata_Plate", "Metadata_Well"]
+        missing_metadata = [c for c in required_metadata if c not in df.columns]
+        if missing_metadata:
+            raise ValueError(
+                f"{source_label}: missing required metadata columns: {missing_metadata}. "
+                "Check the CellProfiler ExportToDatabase/ExportToSpreadsheet metadata settings."
+            )
+        df["Metadata_Plate"] = df["Metadata_Plate"].astype("string").str.strip()
+        df["Metadata_Well"] = df["Metadata_Well"].map(norm_well)
+        invalid_metadata = (
+            df["Metadata_Plate"].isna()
+            | df["Metadata_Well"].isna()
+            | df["Metadata_Plate"].eq("")
+            | df["Metadata_Well"].eq("")
+        )
+        if invalid_metadata.any():
+            raise ValueError(
+                f"{source_label}: {int(invalid_metadata.sum()):,} rows have invalid plate/well metadata."
+            )
+        print(f"  ✓ Validated {len(df):,} single-cell profiles")
+        return df
+
     def read_legacy_single_cell_csv(csv_path: Path) -> pd.DataFrame:
         """Read and validate a previously generated single-cell profile CSV.
 
@@ -532,140 +590,7 @@ def _(Path, dedupe_meta, ensure_core_metadata, norm_well, pd, sqlite3):
 
         return df
 
-    def read_cellprofiler_sqlite(sqlite_path: Path) -> pd.DataFrame:
-        """Merge CellProfiler image/cell/cytoplasm/nuclei tables."""
-        sqlite_path = Path(sqlite_path)
-        file_size_mb = sqlite_path.stat().st_size / (1024**2)
-        print(f"  Opening {sqlite_path.name} ({file_size_mb:,.1f} MB)", flush=True)
-
-        with sqlite3.connect(sqlite_path) as connection:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            required = {"Per_Image", "Per_Cells", "Per_Cytoplasm", "Per_Nuclei"}
-            missing = sorted(required - tables)
-            if missing:
-                raise ValueError(
-                    f"{sqlite_path.name} is missing required CellProfiler table(s): "
-                    + ", ".join(missing)
-                )
-
-            print("    Reading image metadata", flush=True)
-            image_columns = [
-                row[1] for row in connection.execute("PRAGMA table_info(Per_Image)")
-            ]
-            selected_image_columns = [
-                column
-                for column in image_columns
-                if column == "ImageNumber" or column.startswith("Image_Metadata_")
-            ]
-            image = pd.read_sql_query(
-                "SELECT " + ", ".join(f'\"{c}\"' for c in selected_image_columns) + " FROM Per_Image",
-                connection,
-            ).rename(columns=lambda c: c.removeprefix("Image_") if c != "ImageNumber" else c)
-
-            cytoplasm_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(Per_Cytoplasm)")
-            }
-            nucleus_parent_column = next(
-                (
-                    column
-                    for column in (
-                        "Cytoplasm_Parent_Nuclei",
-                        "Cytoplasm_Parent_NucleiWithBorders",
-                    )
-                    if column in cytoplasm_columns
-                ),
-                None,
-            )
-            if nucleus_parent_column is None:
-                raise ValueError(
-                    f"{sqlite_path.name}: Per_Cytoplasm has no supported nucleus-parent column."
-                )
-
-            print("    Reading Cells measurements", flush=True)
-            cells = pd.read_sql_query("SELECT * FROM Per_Cells", connection)
-            print("    Reading Cytoplasm measurements", flush=True)
-            cytoplasm = pd.read_sql_query("SELECT * FROM Per_Cytoplasm", connection)
-            print("    Reading Nuclei measurements", flush=True)
-            nuclei = pd.read_sql_query("SELECT * FROM Per_Nuclei", connection)
-
-        merged = cells.merge(
-            cytoplasm,
-            left_on=["ImageNumber", "Cells_Number_Object_Number"],
-            right_on=["ImageNumber", "Cytoplasm_Parent_Cells"],
-            how="inner",
-            validate="one_to_one",
-        ).merge(
-            nuclei,
-            left_on=["ImageNumber", nucleus_parent_column],
-            right_on=["ImageNumber", "Nuclei_Number_Object_Number"],
-            how="inner",
-            validate="one_to_one",
-        ).merge(image, on="ImageNumber", how="left", validate="many_to_one")
-
-        if merged.empty:
-            raise ValueError(f"{sqlite_path.name}: compartment merge produced no cells.")
-        merged = ensure_core_metadata(dedupe_meta(merged))
-        merged["Metadata_Plate"] = merged["Metadata_Plate"].astype("string").str.strip()
-        merged["Metadata_Well"] = merged["Metadata_Well"].map(norm_well)
-        print(f"    ✓ {len(merged):,} cells × {merged.shape[1]:,} columns", flush=True)
-        return merged
-
-    def read_cellprofiler_csvs(csv_paths) -> pd.DataFrame:
-        """Read one merged CSV or merge four CellProfiler table CSVs."""
-        csv_paths = [Path(path) for path in csv_paths]
-        if len(csv_paths) == 1:
-            return read_legacy_single_cell_csv(csv_paths[0])
-
-        _aliases = {
-            "image": {"image", "per_image"},
-            "cells": {"cells", "per_cells"},
-            "cytoplasm": {"cytoplasm", "per_cytoplasm"},
-            "nuclei": {"nuclei", "per_nuclei"},
-        }
-        _tables = {}
-        for _path in csv_paths:
-            _logical = next(
-                (name for name, stems in _aliases.items() if _path.stem.lower() in stems),
-                None,
-            )
-            if _logical:
-                print(f"  Reading {_path.name}", flush=True)
-                _tables[_logical] = pd.read_csv(_path, low_memory=False)
-        _missing = sorted(set(_aliases) - set(_tables))
-        if _missing:
-            raise ValueError(
-                "Multiple CSVs were found, but these CellProfiler tables are missing: "
-                + ", ".join(_missing)
-            )
-        _cytoplasm = _tables["cytoplasm"]
-        _nucleus_parent = next(
-            (column for column in ("Cytoplasm_Parent_Nuclei", "Cytoplasm_Parent_NucleiWithBorders")
-             if column in _cytoplasm.columns),
-            None,
-        )
-        if _nucleus_parent is None:
-            raise ValueError("Per_Cytoplasm CSV has no supported nucleus-parent column")
-        _merged = _tables["cells"].merge(
-            _cytoplasm,
-            left_on=["ImageNumber", "Cells_Number_Object_Number"],
-            right_on=["ImageNumber", "Cytoplasm_Parent_Cells"],
-            how="inner",
-            validate="one_to_one",
-        ).merge(
-            _tables["nuclei"],
-            left_on=["ImageNumber", _nucleus_parent],
-            right_on=["ImageNumber", "Nuclei_Number_Object_Number"],
-            how="inner",
-            validate="one_to_one",
-        ).merge(_tables["image"], on="ImageNumber", how="left", validate="many_to_one")
-        return ensure_core_metadata(dedupe_meta(_merged))
-
-    return read_cellprofiler_csvs, read_cellprofiler_sqlite, read_legacy_single_cell_csv
+    return prepare_single_cell_profiles, read_legacy_single_cell_csv
 
 
 @app.cell
@@ -677,7 +602,7 @@ def _(mo):
     single-cell table; `plate_dfs` provides one validated DataFrame per
     plate for plate-level QC.
 
-    If `00_image_quality.py` has been run for this experiment, its
+    If `extras/image_quality.py` has been run for this experiment, its
     `results/image_quality/excluded_sites.csv` (Plate/Well/Site combinations
     that failed a blur/saturation/SNR threshold) is applied here, before any
     structural validation below — so debris/out-of-focus/mis-exposed fields
@@ -690,46 +615,41 @@ def _(mo):
 
 @app.cell
 def _(
-    INPUT_FILES,
     INPUT_KIND,
+    INPUT_PATHS,
     RESULTS_DIR,
-    mo,
     pd,
+    prepare_single_cell_profiles,
+    print,
     read_cellprofiler_csvs,
     read_cellprofiler_sqlite,
-    read_legacy_single_cell_csv,
 ):
-    print("═" * 72, flush=True)
-    print("LOADING SINGLE-CELL PROFILES", flush=True)
-    print("═" * 72, flush=True)
+    print("═" * 72)
+    print("LOADING SINGLE-CELL PROFILES")
+    print("═" * 72)
     try:
         if INPUT_KIND == "sqlite":
-            _loaded_parts = []
-            for _index, _path in enumerate(INPUT_FILES, start=1):
-                print(f"[{_index}/{len(INPUT_FILES)}] {_path.name}", flush=True)
-                _loaded_parts.append(read_cellprofiler_sqlite(_path))
-            df_all = pd.concat(_loaded_parts, ignore_index=True, sort=False)
+            _plate_frames = []
+            for _index, _path in enumerate(INPUT_PATHS, start=1):
+                print(f"[{_index}/{len(INPUT_PATHS)}] {_path.name}")
+                _plate_frames.append(read_cellprofiler_sqlite(_path))
+            _raw_profiles = pd.concat(_plate_frames, ignore_index=True, sort=False)
         elif INPUT_KIND == "csv":
-            df_all = read_cellprofiler_csvs(INPUT_FILES)
+            _raw_profiles = read_cellprofiler_csvs(INPUT_PATHS)
         elif INPUT_KIND == "parquet":
-            print(f"Resuming from {INPUT_FILES[0]}", flush=True)
-            df_all = pd.read_parquet(INPUT_FILES[0])
+            print(f"Resuming from previous NB01 parquet: {INPUT_PATHS[0].name}")
+            _raw_profiles = pd.read_parquet(INPUT_PATHS[0])
         else:
-            raise ValueError(f"Unsupported input kind: {INPUT_KIND}")
-    except Exception as _error:
-        mo.stop(
-            True,
-            mo.callout(
-                mo.md(
-                    "**Input loading failed**\n\n"
-                    f"`{type(_error).__name__}: {_error}`\n\n"
-                    "The pipeline stopped here, so downstream cells will not emit "
-                    "secondary/cascading errors."
-                ),
-                kind="danger",
-            ),
+            raise ValueError(f"Unsupported input selection: {INPUT_KIND!r}")
+        df_all = prepare_single_cell_profiles(
+            _raw_profiles,
+            ", ".join(path.name for path in INPUT_PATHS),
         )
-    print(f"✓ Input loaded: {len(df_all):,} cells total", flush=True)
+    except Exception as _error:
+        print("✗ INPUT LOADING FAILED")
+        print(f"  {type(_error).__name__}: {_error}")
+        print("  The full traceback remains available by expanding this cell.")
+        raise
 
     _excluded_sites_csv = RESULTS_DIR / "image_quality" / "excluded_sites.csv"
     if not _excluded_sites_csv.exists():
@@ -741,7 +661,7 @@ def _(
 
         if "Metadata_Site" in df_all.columns and "Metadata_Site" in _excluded.columns:
             # Match on a trailing-underscore-insensitive plate key: raw image
-            # folder names (what NB00's image_qc.infer_plate reads) and this
+            # folder names (what image-quality extra's image_qc.infer_plate reads) and this
             # experiment's single-cell/platemap convention have been observed
             # to disagree on a trailing "_" (e.g. "..._Plate_1" vs.
             # "..._Plate_1_") even though they refer to the same plate. The
@@ -795,7 +715,7 @@ def _(
 
 
 @app.cell
-def _(df_all):
+def _(df_all, print):
     plate_dfs = {
         str(plate_id): df_plate.reset_index(drop=True)
         for plate_id, df_plate in df_all.groupby("Metadata_Plate", sort=True, observed=True)
@@ -851,6 +771,26 @@ def _(CONFIG, mo, plate_dfs):
         label='Excluded plate reasons, one "Plate: reason" per line',
         full_width=True,
     )
+    analysis_mode_help = mo.accordion(
+        {
+            "ⓘ What does analysis mode mean?": mo.md(
+                """
+                **Preliminary** is intended for an early assessment with only
+                part of the planned plates or replicates. Calculations and QC
+                thresholds remain unchanged, but conclusions are labelled as
+                preliminary and should be repeated when the experiment is
+                complete.
+
+                **Final** is intended for the complete experimental dataset.
+                Go/No-Go conclusions are reported as the definitive pipeline
+                decision.
+
+                This setting does **not** select plates. Use **Plates included
+                in downstream analysis** above to define the analyzed subset.
+                """
+            )
+        }
+    )
 
     mo.vstack(
         [
@@ -861,10 +801,12 @@ def _(CONFIG, mo, plate_dfs):
             ),
             included_plates_input,
             mo.hstack([analysis_mode_input, required_references_input], widths=[1, 2]),
+            analysis_mode_help,
             exclusion_reasons_input,
         ]
     )
     return (
+        analysis_mode_help,
         analysis_mode_input,
         detected_plates,
         exclusion_reasons_input,
@@ -963,7 +905,7 @@ def _(mo):
 
 
 @app.cell
-def _(COMPARTMENT_PREFIXES, MIN_CELLS_PER_WELL, plate_dfs):
+def _(COMPARTMENT_PREFIXES, MIN_CELLS_PER_WELL, plate_dfs, print):
     print("═" * 65)
     print("SANITY CHECKS — NB01")
     print("═" * 65)
@@ -1091,7 +1033,8 @@ def _(mo):
 @app.cell
 def _(mo):
     blur_plate_maps_input = mo.ui.checkbox(
-        value=False, label="Blur plate map image (smoothed heatmap instead of sharp per-well grid)"
+        value=False,
+        label="Soften color transitions between observed wells (labels and well boundaries stay fixed)",
     )
     show_treatment_labels_input = mo.ui.checkbox(
         value=True, label="Show treatment labels on plate maps (if a platemap is available)"
@@ -1108,9 +1051,9 @@ def _(
     mo,
     pd,
     plate_dfs,
+    print,
     read_barcode_platemap,
     read_platemap_layout,
-    show_treatment_labels_input,
 ):
     well_treatments_by_plate: dict[str, dict[str, str]] = {}
     _coverage_rows = []
@@ -1128,54 +1071,29 @@ def _(
             for _plate_id in plate_dfs:
                 _row = _barcode_index.loc[_barcode_index["Metadata_Plate"] == _plate_id]
                 if _row.empty:
-                    print(
-                        f"  ⚠ {_plate_id}: no matching Assay_Plate_Barcode in "
-                        f"{_barcode_csv.name}; treatment labels will not be shown for this plate."
-                    )
+                    print(f"  ⚠ {_plate_id}: no barcode mapping; treatment labels will not be shown.")
                     continue
                 _pm_path = _platemap_dir / _row["filename"].iloc[0]
                 if not _pm_path.exists():
-                    _similar_files = sorted(path.name for path in _platemap_dir.glob(f"{_pm_path.stem}*"))
-                    _similar_message = (
-                        f" Similar file(s): {', '.join(_similar_files)}."
-                        if _similar_files else ""
-                    )
-                    print(
-                        f"  ⚠ {_plate_id}: referenced platemap not found: {_pm_path}."
-                        f"{_similar_message} Check duplicated extensions such as '.csv.csv'. "
-                        "The cell-count figure will be generated without treatment labels."
-                    )
+                    _similar = sorted(path.name for path in _platemap_dir.glob(f"{_pm_path.stem}*"))
+                    print(f"  ⚠ {_plate_id}: referenced platemap not found: {_pm_path}. Similar files: {_similar or 'none'}. Check duplicated extensions such as '.csv.csv'. The figure will use counts only.")
                     continue
                 _pm = read_platemap_layout(_pm_path)
-                if show_treatment_labels_input.value:
-                    well_treatments_by_plate[_plate_id] = dict(
-                        zip(_pm["Metadata_Well"], _pm["Metadata_Treatment"].astype(str))
-                    )
-                    print(
-                        f"  ✓ {_plate_id}: loaded {len(well_treatments_by_plate[_plate_id]):,} "
-                        f"well treatment label(s) from {_pm_path.name}"
-                    )
-                else:
-                    print(f"  ℹ {_plate_id}: platemap loaded, but treatment labels are disabled by the checkbox.")
+                well_treatments_by_plate[_plate_id] = dict(
+                    zip(_pm["Metadata_Well"], _pm["Metadata_Treatment"].astype(str))
+                )
+                print(f"  ✓ {_plate_id}: loaded {len(well_treatments_by_plate[_plate_id]):,} treatment label(s) from {_pm_path.name}")
                 _observed_wells = set(plate_dfs[_plate_id]["Metadata_Well"].astype(str))
                 _pm_observed = _pm.loc[_pm["Metadata_Well"].astype(str).isin(_observed_wells)]
                 for _treatment, _count in _pm_observed["Metadata_Treatment"].astype(str).value_counts().items():
                     _coverage_rows.append(
                         {"Plate": _plate_id, "Treatment": _treatment, "Observed wells": int(_count)}
                     )
-            _covered_plates = len(set(r["Plate"] for r in _coverage_rows))
-            print(f"  {'✓' if _covered_plates == len(plate_dfs) else '⚠'} Loaded platemap coverage for {_covered_plates}/{len(plate_dfs)} plate(s)")
+            print(f"  ✓  Loaded platemap coverage for {len(set(r['Plate'] for r in _coverage_rows))}/{len(plate_dfs)} plate(s)")
         except Exception as error:
-            print(f"  ✗ Could not load platemap coverage: {type(error).__name__}: {error}")
-            print("    Cell-count figures will continue without treatment labels; correct the metadata files and rerun this cell.")
+            print(f"  ⚠️  Could not load platemap coverage: {error}")
     else:
-        print("═" * 72)
-        print("PLATEMAP DISCOVERY")
-        print("═" * 72)
-        print("  ℹ Platemap metadata is incomplete; treatment labels cannot be displayed.")
-        print(f"    Barcode index: {_barcode_csv} ({'found' if _barcode_csv.exists() else 'MISSING'})")
-        print(f"    Platemap directory: {_platemap_dir} ({'found' if _platemap_dir.is_dir() else 'MISSING'})")
-        print("    Cell-count figures will still be generated using counts only.")
+        print("  ℹ️  Platemap not found — plate coverage cannot be assessed")
 
     plate_treatment_coverage = pd.DataFrame(
         _coverage_rows, columns=["Plate", "Treatment", "Observed wells"]
@@ -1211,7 +1129,110 @@ def _(
 
 
 @app.cell
-def _(Normalize, Path, np, patches, pd, plt, re):
+def _(ANALYSIS_CONFIG, mo, pd, well_treatments_by_plate):
+    _treatments = sorted(
+        {
+            str(treatment)
+            for _well_map in well_treatments_by_plate.values()
+            for treatment in _well_map.values()
+        }
+    )
+    _alias_rows = pd.DataFrame(
+        [
+            {
+                "Original metadata": treatment,
+                "Short display name": ANALYSIS_CONFIG.treatment_display_aliases.get(
+                    treatment, ""
+                ),
+                "Plates": sum(
+                    treatment in set(map(str, well_map.values()))
+                    for well_map in well_treatments_by_plate.values()
+                ),
+                "Wells": sum(
+                    str(value) == treatment
+                    for well_map in well_treatments_by_plate.values()
+                    for value in well_map.values()
+                ),
+            }
+            for treatment in _treatments
+        ],
+        columns=["Original metadata", "Short display name", "Plates", "Wells"],
+    )
+    treatment_alias_editor = mo.ui.data_editor(
+        _alias_rows,
+        label="Treatment names used in plate figures",
+        editable_columns=["Short display name"],
+        pagination=len(_alias_rows) > 20,
+    )
+    treatment_alias_settings = mo.accordion(
+        {
+            "Advanced · Short names for plate-map labels": mo.vstack(
+                [
+                    mo.md(
+                        "Enter an optional short name beside any long treatment label. "
+                        "The original metadata remains unchanged and continues to be used "
+                        "for every calculation; aliases affect visual labels only. Leave a "
+                        "cell blank to use the original name."
+                    ),
+                    treatment_alias_editor
+                    if not _alias_rows.empty
+                    else mo.callout(
+                        "No treatment metadata was found in the available platemaps.",
+                        kind="warn",
+                    ),
+                ]
+            )
+        }
+    )
+    treatment_alias_settings
+    return treatment_alias_editor, treatment_alias_settings
+
+
+@app.cell
+def _(
+    ANALYSIS_CONFIG,
+    REPO_ROOT,
+    mo,
+    replace,
+    show_treatment_labels_input,
+    treatment_alias_editor,
+    well_treatments_by_plate,
+):
+    _edited_aliases = treatment_alias_editor.value
+    treatment_display_aliases = {
+        str(row["Original metadata"]): str(row["Short display name"]).strip()
+        for row in _edited_aliases.to_dict(orient="records")
+        if str(row["Short display name"]).strip()
+    }
+    VISUALIZATION_CONFIG = replace(
+        ANALYSIS_CONFIG,
+        treatment_display_aliases=treatment_display_aliases,
+    )
+    _alias_config_path = VISUALIZATION_CONFIG.save(REPO_ROOT)
+
+    display_well_treatments_by_plate = (
+        {
+            plate: {
+                well: treatment_display_aliases.get(str(treatment), str(treatment))
+                for well, treatment in well_map.items()
+            }
+            for plate, well_map in well_treatments_by_plate.items()
+        }
+        if show_treatment_labels_input.value
+        else {}
+    )
+    mo.callout(
+        mo.md(
+            f"**Plate-label aliases saved:** {len(treatment_display_aliases)} short "
+            f"name(s) active · `{_alias_config_path}`"
+        ),
+        kind="success" if treatment_display_aliases else "info",
+    )
+    return VISUALIZATION_CONFIG, display_well_treatments_by_plate, treatment_display_aliases
+
+
+@app.cell
+def _(Normalize, Path, np, patches, pd, plt, print, re):
     def plot_cell_count_heatmap(
         df_plate: pd.DataFrame,
         plate_id: str,
@@ -1225,8 +1246,9 @@ def _(Normalize, Path, np, patches, pd, plt, re):
         """Plot and return a publication-friendly plate map of cell counts per well.
 
         Wells below `min_cells` are outlined and marked with a warning symbol.
-        `smooth_image=True` renders the heatmap with smoothed (blurred)
-        interpolation between wells instead of the default sharp grid.
+        `smooth_image=True` softens color transitions between adjacent
+        observed wells while preserving the exact color at each well center.
+        Missing wells remain explicitly masked and are never interpolated.
         `well_treatments` (well ID -> label) optionally adds a treatment
         label below the cell count for each well, when available.
         """
@@ -1300,11 +1322,20 @@ def _(Normalize, Path, np, patches, pd, plt, re):
         figure_width = max(8.0, n_columns * 0.72)
         figure_height = max(4.8, len(rows) * 0.70)
         fig, ax = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
-        image = ax.imshow(
-            values, cmap=cmap, norm=norm,
-            interpolation="gaussian" if smooth_image else "none",
-            aspect="equal",
-        )
+        _image_options = {
+            "cmap": cmap,
+            "norm": norm,
+            "interpolation": "bilinear" if smooth_image else "none",
+            "aspect": "equal",
+        }
+        if smooth_image:
+            # Gaussian interpolation changes the color even at the original
+            # well centers and spreads masked/NaN regions over neighboring
+            # wells. Bilinear interpolation in RGBA space preserves each
+            # sampled center; explicit missing-well patches below prevent
+            # color bleeding into positions with no observations.
+            _image_options["interpolation_stage"] = "rgba"
+        image = ax.imshow(values, **_image_options)
 
         ax.set_xticks(np.arange(n_columns))
         ax.set_xticklabels(columns)
@@ -1338,7 +1369,26 @@ def _(Normalize, Path, np, patches, pd, plt, re):
             for column_index, column_number in enumerate(columns):
                 value = grid.loc[row_name, column_number]
                 if pd.isna(value):
-                    ax.text(column_index, row_index, "—", ha="center", va="center", fontsize=9, color="#777777")
+                    ax.add_patch(
+                        patches.Rectangle(
+                            (column_index - 0.5, row_index - 0.5),
+                            1.0,
+                            1.0,
+                            facecolor="#E8E8E8",
+                            edgecolor="none",
+                            zorder=2,
+                        )
+                    )
+                    ax.text(
+                        column_index,
+                        row_index,
+                        "—",
+                        ha="center",
+                        va="center",
+                        fontsize=9,
+                        color="#777777",
+                        zorder=3,
+                    )
                     continue
 
                 value = int(value)
@@ -1412,7 +1462,7 @@ def _(Normalize, Path, np, patches, pd, plt, re):
         n_low = len(low_count_wells)
         clean_plate_id = str(plate_id).strip()
 
-        fig.suptitle(f"Cell count per well — {clean_plate_id}", fontsize=14, fontweight="semibold", y=1.06)
+        fig.suptitle(f"Cell count per well — {clean_plate_id}", fontsize=14, fontweight="bold", y=1.06)
         ax.set_title(
             f"{n_observed} observed wells · {n_low} below QC threshold (< {min_cells:,} cells)",
             fontsize=9.5,
@@ -1459,13 +1509,15 @@ def _(Normalize, Path, np, patches, pd, plt, re):
 @app.cell
 def _(
     FIGS_DIR,
+    INPUT_PATHS,
     MIN_CELLS_PER_WELL,
     PLATE_FORMAT,
     blur_plate_maps_input,
+    display_well_treatments_by_plate,
     mo,
     plate_dfs,
     plot_cell_count_heatmap,
-    well_treatments_by_plate: dict[str, dict[str, str]],
+    print,
 ):
     global_max = max(
         df_plate.groupby("Metadata_Well", observed=True).size().max()
@@ -1479,8 +1531,6 @@ def _(
 
     plate_map_figures = []
     for _plate_id, _df_plate in plate_dfs.items():
-        _label_count = len(well_treatments_by_plate.get(_plate_id, {}))
-        print(f"  → {_plate_id}: generating plate map with {_label_count:,} treatment label(s)")
         _figure = plot_cell_count_heatmap(
             df_plate=_df_plate,
             plate_id=_plate_id,
@@ -1489,12 +1539,10 @@ def _(
             plate_format=PLATE_FORMAT,
             vmax=global_max,
             smooth_image=blur_plate_maps_input.value,
-            well_treatments=well_treatments_by_plate.get(_plate_id),
+            well_treatments=display_well_treatments_by_plate.get(_plate_id),
         )
         if _figure is not None:
             plate_map_figures.append(_figure)
-
-    print(f"\n✓ SC-05 finished: {len(plate_map_figures)}/{len(plate_dfs)} plate map(s) generated and displayed below.")
 
     mo.vstack(plate_map_figures)
     return
@@ -1511,7 +1559,7 @@ def _(mo):
 
 
 @app.cell
-def _(MIN_CELLS_PER_WELL, add_cell_count_metadata, df_all, pd):
+def _(MIN_CELLS_PER_WELL, add_cell_count_metadata, df_all, pd, print):
     def normalize_count_table(table: pd.DataFrame) -> pd.DataFrame:
         """Return a standardized cell-count table for safe comparison."""
         required_columns = ["Metadata_Plate", "Metadata_Well", "n_cells"]
@@ -1556,14 +1604,12 @@ def _(MIN_CELLS_PER_WELL, add_cell_count_metadata, df_all, pd):
 
 
 @app.cell
-def _(CONFIG, COUNTS_CSV, counts_df, write_summary_table_protected):
+def _(CONFIG, COUNTS_CSV, counts_df, print, write_summary_table_protected):
     counts_export_status = write_summary_table_protected(
         counts_df, COUNTS_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    _status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(counts_export_status, counts_export_status)
-    print(f"✓ Count-summary file: {_status_text}")
+    print(f"✓ Count-summary file {counts_export_status}")
     print(f"  File: {COUNTS_CSV}")
-    print(f"  Verified: {'yes' if COUNTS_CSV.is_file() else 'NO'} · {COUNTS_CSV.stat().st_size:,} bytes")
     return
 
 
@@ -1591,6 +1637,7 @@ def _(
     infer_feature_cols,
     np,
     pd,
+    print,
     write_summary_table_protected,
 ):
     feature_columns = infer_feature_cols(df_all_with_counts)
@@ -1655,10 +1702,8 @@ def _(
     feature_integrity_status = write_summary_table_protected(
         feature_integrity_df, FEATURE_INTEGRITY_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    _status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(feature_integrity_status, feature_integrity_status)
-    print(f"\n✓ Feature-integrity report: {_status_text}")
+    print(f"\n✓ Feature-integrity report {feature_integrity_status}")
     print(f"  File: {FEATURE_INTEGRITY_CSV}")
-    print(f"  Verified: {'yes' if FEATURE_INTEGRITY_CSV.is_file() else 'NO'} · {FEATURE_INTEGRITY_CSV.stat().st_size:,} bytes")
     return (
         FEATURE_INTEGRITY_CSV,
         feature_columns,
@@ -1686,6 +1731,7 @@ def _(
     OUTPUT_CSV,
     OUTPUT_PARQUET,
     df_all_with_counts,
+    print,
     write_csv_protected,
     write_parquet_protected,
 ):
@@ -1700,18 +1746,14 @@ def _(
     parquet_export_status = write_parquet_protected(
         df_all_with_counts, OUTPUT_PARQUET, overwrite=CONFIG.overwrite_existing_outputs
     )
-    _parquet_status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(parquet_export_status, parquet_export_status)
-    print(f"✓ Parquet profile: {_parquet_status_text}")
+    print(f"✓ Parquet profile {parquet_export_status}")
     print(f"  File: {OUTPUT_PARQUET}")
-    print(f"  Verified: {'yes' if OUTPUT_PARQUET.is_file() else 'NO'} · {OUTPUT_PARQUET.stat().st_size:,} bytes")
 
     csv_export_status = write_csv_protected(
         df_all_with_counts, OUTPUT_CSV, overwrite=CONFIG.overwrite_existing_outputs
     )
-    _csv_status_text = {"created": "CREATED", "unchanged": "ALREADY CURRENT", "replaced": "REPLACED"}.get(csv_export_status, csv_export_status)
-    print(f"\n✓ CSV interoperability copy: {_csv_status_text}")
+    print(f"\n✓ CSV interoperability copy {csv_export_status}")
     print(f"  File: {OUTPUT_CSV}")
-    print(f"  Verified: {'yes' if OUTPUT_CSV.is_file() else 'NO'} · {OUTPUT_CSV.stat().st_size:,} bytes")
     return
 
 
@@ -1753,10 +1795,12 @@ def _(
     partially_missing_features,
     pd,
     platform,
+    print,
     subprocess,
     timezone,
 ):
     NOTEBOOK_NAME = "01_samples_retrieval.py"
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
 
     def run_git_command(arguments: Sequence[str], repo_root) -> str | None:
         """Run a read-only Git command and return stripped stdout."""
@@ -1779,7 +1823,7 @@ def _(
     git_status = run_git_command(["status", "--porcelain"], REPO_ROOT)
 
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pipeline": {
             "notebook": NOTEBOOK_NAME,
             "experiment_id": EXPERIMENT_ID,
@@ -1828,10 +1872,22 @@ def _(
         },
     }
 
+    provenance = canonicalize_provenance(
+        provenance,
+        notebook=NOTEBOOK_NAME,
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=INPUT_PATHS,
+        outputs=[OUTPUT_PARQUET, OUTPUT_CSV, COUNTS_CSV, FEATURE_INTEGRITY_CSV],
+    )
+    _provenance_payload = provenance_json(provenance)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     provenance_latest_path = RESULTS_DIR / "provenance_nb01_latest.json"
-    with provenance_latest_path.open("w", encoding="utf-8") as _f:
-        json.dump(provenance, _f, indent=2, ensure_ascii=False)
+    if provenance_latest_path.exists() and not CONFIG.overwrite_existing_outputs:
+        _latest_status = "unchanged (existing provenance protected)"
+    else:
+        _latest_status = "replaced" if provenance_latest_path.exists() else "created"
+        provenance_latest_path.write_text(_provenance_payload, encoding="utf-8")
 
     provenance_history_path = None
     if CONFIG.save_provenance_history:
@@ -1839,8 +1895,7 @@ def _(
         provenance_history_path = RESULTS_DIR / f"provenance_nb01_{_timestamp}.json"
         if provenance_history_path.exists():
             raise FileExistsError(f"Historical provenance file already exists: {provenance_history_path}")
-        with provenance_history_path.open("w", encoding="utf-8") as _f:
-            json.dump(provenance, _f, indent=2, ensure_ascii=False)
+        provenance_history_path.write_text(_provenance_payload, encoding="utf-8")
 
     print("═" * 72)
     print("NB01 PROVENANCE")
@@ -1857,7 +1912,9 @@ def _(
         print("  Working tree:        clean")
     else:
         print("  Working tree:        unknown")
-    print(f"\n✓ Latest provenance:   {provenance_latest_path}")
+    print(f"\n✓ Latest provenance {_latest_status}: {provenance_latest_path}")
+    print(f"  Schema:              v{provenance['schema_version']}")
+    print(f"  Dependencies hashed: {len(provenance['dependencies'])}")
     if provenance_history_path is not None:
         print(f"✓ Historical record:  {provenance_history_path}")
     else:
@@ -1892,6 +1949,7 @@ def _(
     n_infinite,
     partially_missing_features,
     plate_dfs,
+    print,
     provenance_latest_path,
 ):
     integrity_errors = []
@@ -1952,47 +2010,36 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    This saves **two complementary versions of the notebook's current
+    session**:
+
+    - **HTML:** preserves the complete interactive record, including content
+      that may be collapsed or difficult to fit on a printed page;
+    - **PDF:** provides a fixed, convenient version for reading and sharing.
+
+    Saving captures the outputs currently visible in this session. It does
+    **not** run the notebook again, repeat expensive analyses, or generate
+    new stochastic artifacts.
+
+    On the first use, choose
+    `workspace/analysis/<experiment>/reports`. Chromium-based browsers can
+    remember this choice; browsers without direct folder access will place
+    both files in Downloads instead.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_01_samples_retrieval",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 

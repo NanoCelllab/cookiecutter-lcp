@@ -8,13 +8,18 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
 
-    return (mo,)
+    def print(*values, sep=" ", end="\n"):
+        """Display console-style progress in both notebook and App mode."""
+        message = sep.join(str(value) for value in values) + end
+        mo.output.append(mo.plain_text(message))
+
+    return mo, print
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 07 — Single-Cell Phenotypic Recovery Axis (OPTIONAL, experiment-specific)
+    # Extra — Single-Cell Phenotypic Recovery Axis
 
     > **This notebook is OPTIONAL and not part of the required 01→06 pipeline.**
     > It only applies to datasets with a **two-reference-state experimental
@@ -25,21 +30,12 @@ def _(mo):
     > nothing for this notebook to compute, and the notebook will say so and
     > stop gracefully rather than raising an error.
 
-    ## Why this is its own notebook
+    ## Why this is an optional extra
 
-    `06_single_cell_analysis.ipynb` originally embedded a ~30-cell
-    "single-cell phenotypic recovery axis" block. That block encodes a
-    specific experimental design (exactly two named reference states), not a
-    generic pipeline step, so it has been extracted here — clearly labeled as
-    optional — instead of living inside the required numbered sequence.
-
-    Unlike the source notebook (and the standalone `.ipynb` copy this
-    notebook retires), this file does **not** rely on any upstream
-    notebook's in-memory state (no `globals().get(...)` lookups — marimo
-    doesn't share a kernel namespace across files anyway). It loads
-    `single_cell_ready.parquet` directly from NB02's cache and re-derives its
-    own lightweight single-cell PCA — enough to compute the recovery-axis
-    geometry, not a full reproduction of NB06's clustering/SHAP machinery.
+    A recovery axis encodes a specific two-reference-state design rather than
+    a generic profiling step. This notebook therefore loads its checkpoint
+    directly and computes only the PCA and validation needed for that design;
+    it does not depend on another notebook's in-memory state.
 
     ## What this notebook does
 
@@ -73,6 +69,19 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
+    ### What this notebook cannot tell you
+
+    Recovery scores are conditional on the selected baseline and proliferative
+    references being valid, replicated, and distinguishable. The axis measures
+    similarity along that contrast; it does not prove restoration of mechanism,
+    function, or cell fate, and it may miss orthogonal phenotypes.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## 0 — Imports and shared utilities
     """)
     return
@@ -96,7 +105,7 @@ def _():
     from sklearn.decomposition import PCA
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import average_precision_score, balanced_accuracy_score, roc_auc_score
-    from sklearn.model_selection import GroupKFold
+    from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import RobustScaler, StandardScaler
 
@@ -112,7 +121,7 @@ def _():
     )
     pd.set_option("display.max_columns", 80)
     return (
-        GroupKFold,
+        StratifiedGroupKFold,
         LogisticRegression,
         PCA,
         Path,
@@ -137,12 +146,11 @@ def _():
 
 
 @app.cell
-def _(Path):
+def _(Path, print):
     # Locate the repo root before hca_pipeline can be imported (bootstrap:
     # can't import find_repo_root from the package until sys.path includes
     # workspace). __file__ is used instead of cwd so this notebook
-    # behaves identically under `marimo edit`, a plain `python` run, or an
-    # automated headless run from any working directory.
+    # behaves identically regardless of the launch working directory.
     import sys
 
     _notebook_path = Path(__file__).resolve()
@@ -168,6 +176,7 @@ def _(Path):
     from hca_pipeline.io import write_csv_protected, write_parquet_protected
     from hca_pipeline.modelling import balanced_sample
     from hca_pipeline.normalize import clean_features_before_normalization
+    from hca_pipeline.plotting import save_figure_protected
     from hca_pipeline.taxonomy import build_taxonomy_table
 
     print(f"  ✓  Shared utilities loaded from hca_pipeline ({_pipelines_dir})")
@@ -178,6 +187,7 @@ def _(Path):
         build_taxonomy_table,
         clean_features_before_normalization,
         infer_feature_cols,
+        save_figure_protected,
         write_csv_protected,
         write_parquet_protected,
     )
@@ -248,19 +258,12 @@ def _(loaded_config, mo):
     save_history_input = mo.ui.checkbox(
         value=loaded_config.save_provenance_history, label="Save timestamped provenance history"
     )
-    mo.vstack(
-        [
-            random_state_input,
-            n_per_class_input,
-            n_pca_components_input,
-            n_recovery_pcs_input,
-            nan_threshold_input,
-            proliferative_probability_threshold_input,
-            recovery_score_threshold_input,
-            overwrite_input,
-            save_history_input,
-        ]
-    )
+    mo.accordion({"Advanced recovery-axis and output settings": mo.vstack([
+        random_state_input, n_per_class_input, n_pca_components_input,
+        n_recovery_pcs_input, nan_threshold_input,
+        proliferative_probability_threshold_input, recovery_score_threshold_input,
+        overwrite_input, save_history_input,
+    ])})
     return (
         n_pca_components_input,
         n_per_class_input,
@@ -289,6 +292,7 @@ def _(
     recovery_score_threshold_input,
     replace,
     save_history_input,
+    print,
 ):
     EXPERIMENT_ID = experiment_id_input.value
     RANDOM_STATE = int(random_state_input.value)
@@ -333,19 +337,26 @@ def _(
 
 
 @app.cell
-def _(EXPERIMENT_ID, REPO_ROOT):
+def _(EXPERIMENT_ID, REPO_ROOT, print):
     WORKSPACE_DIR = REPO_ROOT / "workspace"
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
     PROFILES_DIR = WORKSPACE_DIR / "profiles" / EXPERIMENT_ID
 
-    CACHE_DIR = PROFILES_DIR / "outputs" / "cache"
+    PROFILES_OUT_DIR = PROFILES_DIR / "outputs"
     # Deliberately namespaced under `recovery_axis/` — NOT the bare `results/`
     # / `figures/single_cell/` directories NB06 uses — so this optional
     # notebook's outputs never collide with 06_single_cell_analysis.py's.
     RESULTS_DIR = ANALYSIS_DIR / "results" / "recovery_axis"
     FIGS_DIR = ANALYSIS_DIR / "figures" / "recovery_axis"
 
-    INPUT_PARQUET = CACHE_DIR / "single_cell_ready.parquet"
+    INPUT_PARQUET = PROFILES_OUT_DIR / "single_cell_ready.parquet"
+    _legacy_input = PROFILES_OUT_DIR / "cache" / "single_cell_ready.parquet"
+    if not INPUT_PARQUET.exists() and _legacy_input.exists():
+        INPUT_PARQUET = _legacy_input
+        print(
+            "  ℹ Using the legacy NB02 cache location for compatibility. "
+            "Rerun NB02 once to promote this file to a declared output."
+        )
 
     for _directory in (RESULTS_DIR, FIGS_DIR):
         _directory.mkdir(parents=True, exist_ok=True)
@@ -362,14 +373,14 @@ def _(mo):
     mo.md(r"""
     ## 2 — Load single-cell profiles
 
-    Loaded directly from NB02's cache — this notebook does not assume
+    Loaded from NB02's declared single-cell output — this notebook does not assume
     `06_single_cell_analysis.py` has been run first.
     """)
     return
 
 
 @app.cell
-def _(INPUT_PARQUET, pd):
+def _(INPUT_PARQUET, pd, print):
     if not INPUT_PARQUET.exists():
         raise FileNotFoundError(
             f"Input not found: {INPUT_PARQUET}\n"
@@ -383,7 +394,7 @@ def _(INPUT_PARQUET, pd):
 
 
 @app.cell
-def _(CONFIG, df_sc):
+def _(CONFIG, df_sc, print):
     _resolved = CONFIG.resolve_columns(df_sc)
     PLATE_COL = _resolved.plate_col
     WELL_COL = _resolved.well_col
@@ -413,11 +424,8 @@ def _(mo):
 def _(TREATMENT_COL, df_sc, mo):
     _treatment_values = sorted(df_sc[TREATMENT_COL].dropna().astype(str).unique().tolist())
     _dropdown_options = [""] + _treatment_values
-    # "Non-treated" / "Non-dormant" are this dataset's actual reference
-    # labels, pre-selected here only because they happen to be present —
-    # a different dataset without them falls back to "" (unset).
-    _default_baseline = "Non-treated" if "Non-treated" in _treatment_values else ""
-    _default_proliferative = "Non-dormant" if "Non-dormant" in _treatment_values else ""
+    _default_baseline = ""
+    _default_proliferative = ""
 
     baseline_label_input = mo.ui.dropdown(
         options=_dropdown_options,
@@ -439,6 +447,7 @@ def _(
     baseline_label_input,
     df_sc,
     mo,
+    print,
     proliferative_label_input,
 ):
     _treatment_counts = df_sc[TREATMENT_COL].astype(str).value_counts()
@@ -502,11 +511,13 @@ def _(mo):
 @app.cell
 def _(
     BASELINE_LABEL,
+    CONC_COL,
     NAN_THRESHOLD,
     PROLIFERATIVE_LABEL,
     clean_features_before_normalization,
     df_sc,
     infer_feature_cols,
+    print,
 ):
     print(f"Curating single-cell features for the recovery axis between {BASELINE_LABEL!r} and {PROLIFERATIVE_LABEL!r}")
 
@@ -534,13 +545,15 @@ def _(
 
 
 @app.cell
-def _(RobustScaler, df_sc_cleaned, feature_cols_after_missingness, np, pd):
+def _(RobustScaler, df_sc_cleaned, feature_cols_after_missingness, np, pd, print):
     _X_raw = df_sc_cleaned[feature_cols_after_missingness].apply(pd.to_numeric, errors="coerce")
     _variance = _X_raw.var(skipna=True).to_numpy()
     _n_unique = _X_raw.nunique(dropna=True).to_numpy()
     _variable_mask = np.isfinite(_variance) & (_n_unique >= 3) & (_variance > 0)
     feature_cols_model = [c for c, keep in zip(feature_cols_after_missingness, _variable_mask) if keep]
     _n_removed_low_variance = len(feature_cols_after_missingness) - len(feature_cols_model)
+    if not feature_cols_model:
+        raise ValueError("Feature curation removed every feature as constant or non-finite.")
 
     _X_model = _X_raw[feature_cols_model].to_numpy(dtype=float)
     _scaler = RobustScaler()
@@ -575,6 +588,7 @@ def _(
     X_sc_scaled,
     balanced_sample,
     df_sc_cleaned,
+    print,
 ):
     _df_sampled_full, X_sampled = balanced_sample(df_sc_cleaned, X_sc_scaled, TREATMENT_COL, N_PER_CLASS, RANDOM_STATE)
 
@@ -586,6 +600,15 @@ def _(
     df_sc_sampled = _df_sampled_full[_meta_cols_needed].reset_index(drop=True).copy()
 
     _n_components = min(N_PCA_COMPONENTS, X_sampled.shape[0] - 1, X_sampled.shape[1])
+    if _n_components < 2:
+        raise ValueError(
+            f"Recovery-axis PCA requires at least two components; only {_n_components} is available."
+        )
+    if _n_components < N_PCA_COMPONENTS:
+        print(
+            f"ℹ PCA components reduced from {N_PCA_COMPONENTS} to {_n_components} "
+            "to match sampled cells and curated features."
+        )
     pca_sc = PCA(n_components=_n_components, random_state=RANDOM_STATE)
     X_sc_pca = pca_sc.fit_transform(X_sampled)
 
@@ -634,6 +657,7 @@ def _(
     X_sc_pca,
     df_sc_sampled,
     np,
+    print,
 ):
     N_RECOVERY_PCS = min(N_RECOVERY_PCS_TARGET, X_sc_pca.shape[1])
 
@@ -673,6 +697,7 @@ def _(
     TREATMENT_COL,
     X_recovery,
     np,
+    print,
     recovery_meta,
 ):
     baseline_mask = recovery_meta[TREATMENT_COL].eq(BASELINE_LABEL).to_numpy()
@@ -710,7 +735,9 @@ def _(
 @app.cell
 def _(
     BASELINE_LABEL,
+    CONFIG,
     FIGS_DIR,
+    INPUT_PARQUET,
     PLATE_COL,
     PROLIFERATIVE_LABEL,
     TREATMENT_COL,
@@ -718,6 +745,8 @@ def _(
     cell_recovery_df,
     np,
     plt,
+    print,
+    save_figure_protected,
 ):
     _reference_geometric_wells = (
         cell_recovery_df.loc[cell_recovery_df[TREATMENT_COL].isin([BASELINE_LABEL, PROLIFERATIVE_LABEL])]
@@ -748,9 +777,13 @@ def _(
     _axes[0].set_title("Reference separation")
     _axes[1].set_title("Deviation from recovery axis")
     _fig.tight_layout()
-    _fig.savefig(FIGS_DIR / "reference_geometric_validation.png", dpi=180, bbox_inches="tight")
+    _figure_path = FIGS_DIR / "reference_geometric_validation.png"
+    _figure_status = save_figure_protected(
+        _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=180, bbox_inches="tight",
+    )
     plt.close(_fig)
-    print(f"✓ Saved: reference_geometric_validation.png ({len(_reference_geometric_wells)} reference wells)")
+    print(f"✓ Reference geometry figure {_figure_status}: {_figure_path} ({len(_reference_geometric_wells)} reference wells)")
     _fig
     return
 
@@ -778,6 +811,7 @@ def _(
     WELL_COL,
     X_recovery,
     pd,
+    print,
     recovery_meta,
 ):
     reference_mask = recovery_meta[TREATMENT_COL].isin([BASELINE_LABEL, PROLIFERATIVE_LABEL]).to_numpy()
@@ -795,7 +829,7 @@ def _(
 
 @app.cell
 def _(
-    GroupKFold,
+    StratifiedGroupKFold,
     LogisticRegression,
     PROLIFERATIVE_PROBABILITY_THRESHOLD,
     RANDOM_STATE,
@@ -809,15 +843,27 @@ def _(
     reference_groups,
     roc_auc_score,
     y_reference,
+    print,
 ):
-    n_splits = min(5, pd.Series(reference_groups).nunique())
-    if n_splits < 2:
-        raise ValueError("At least two reference wells are required for grouped cross-validation.")
-    cv = GroupKFold(n_splits=n_splits)
+    _reference_well_classes = pd.DataFrame(
+        {"group": reference_groups, "label": y_reference}
+    ).drop_duplicates()
+    _wells_per_class = _reference_well_classes.groupby("label")["group"].nunique()
+    if len(_wells_per_class) < 2 or int(_wells_per_class.min()) < 2:
+        raise ValueError(
+            "Grouped classifier validation requires at least two independent wells in each "
+            f"reference state; observed wells per class: {_wells_per_class.to_dict()}."
+        )
+    n_splits = min(5, int(_wells_per_class.min()))
+    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     cv_probability = np.full(len(y_reference), np.nan)
     _cv_prediction = np.full(len(y_reference), -1)
     _fold_records = []
     for _fold, (_tr, _te) in enumerate(cv.split(X_reference, y_reference, groups=reference_groups), start=1):
+        if len(np.unique(y_reference[_tr])) < 2 or len(np.unique(y_reference[_te])) < 2:
+            raise ValueError(
+                f"Grouped validation fold {_fold} does not contain both reference states."
+            )
         _model = make_pipeline(
             StandardScaler(),
             LogisticRegression(penalty="l2", class_weight="balanced", max_iter=5000, random_state=RANDOM_STATE),
@@ -846,6 +892,7 @@ def _(
 @app.cell
 def _(
     BASELINE_LABEL,
+    CONFIG,
     FIGS_DIR,
     PLATE_COL,
     PROLIFERATIVE_LABEL,
@@ -855,7 +902,9 @@ def _(
     cv_probability,
     np,
     plt,
+    print,
     reference_meta,
+    save_figure_protected,
 ):
     reference_cv_df = reference_meta.copy()
     reference_cv_df["cv_proliferative_probability"] = cv_probability
@@ -893,9 +942,13 @@ def _(
     _axes[1].set_ylabel("Density")
     _axes[1].legend()
     _fig.tight_layout()
-    _fig.savefig(FIGS_DIR / "reference_classifier_validation.png", dpi=180, bbox_inches="tight")
+    _figure_path = FIGS_DIR / "reference_classifier_validation.png"
+    _figure_status = save_figure_protected(
+        _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=180, bbox_inches="tight",
+    )
     plt.close(_fig)
-    print(f"✓ Saved: reference_classifier_validation.png ({len(reference_cv_wells)} reference wells)")
+    print(f"✓ Classifier-validation figure {_figure_status}: {_figure_path} ({len(reference_cv_wells)} reference wells)")
     _fig
     return
 
@@ -925,6 +978,7 @@ def _(
     X_reference,
     cell_recovery_df,
     make_pipeline,
+    print,
     write_parquet_protected,
     y_reference,
 ):
@@ -967,6 +1021,7 @@ def _(
     TREATMENT_COL,
     WELL_COL,
     cell_recovery_df,
+    print,
     write_csv_protected,
 ):
     _group_columns = [PLATE_COL, WELL_COL, TREATMENT_COL]
@@ -1007,6 +1062,7 @@ def _(
     TREATMENT_COL,
     WELL_COL,
     well_recovery_df,
+    print,
     write_csv_protected,
 ):
     _condition_columns = [TREATMENT_COL] + ([CONC_COL] if CONC_COL and CONC_COL in well_recovery_df.columns else [])
@@ -1044,7 +1100,7 @@ def _(mo):
 
 
 @app.cell
-def _(FIGS_DIR, TREATMENT_COL, plt, well_recovery_df):
+def _(CONFIG, FIGS_DIR, TREATMENT_COL, plt, print, save_figure_protected, well_recovery_df):
     _fig, _ax = plt.subplots(figsize=(9, 7))
     for _treatment, _sub in well_recovery_df.groupby(TREATMENT_COL, observed=True):
         _ax.scatter(_sub["recovery_median"], _sub["orthogonal_distance_median"], s=65, alpha=0.8, label=str(_treatment))
@@ -1055,20 +1111,27 @@ def _(FIGS_DIR, TREATMENT_COL, plt, well_recovery_df):
     _ax.set_title("Recovery-like displacement versus alternative phenotype")
     _ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
     _fig.tight_layout()
-    _fig.savefig(FIGS_DIR / "recovery_parallel_vs_orthogonal.png", dpi=180, bbox_inches="tight")
+    _figure_path = FIGS_DIR / "recovery_parallel_vs_orthogonal.png"
+    _figure_status = save_figure_protected(
+        _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=180, bbox_inches="tight",
+    )
     plt.close(_fig)
-    print("✓ Saved: recovery_parallel_vs_orthogonal.png")
+    print(f"✓ Recovery/orthogonal figure {_figure_status}: {_figure_path}")
     _fig
     return
 
 
 @app.cell
 def _(
+    CONFIG,
     FIGS_DIR,
     PROLIFERATIVE_PROBABILITY_THRESHOLD,
     TREATMENT_COL,
     np,
     plt,
+    print,
+    save_figure_protected,
     well_recovery_df,
 ):
     _order = well_recovery_df[TREATMENT_COL].astype(str).drop_duplicates().tolist()
@@ -1092,9 +1155,13 @@ def _(
     _axes[2].set_ylim(-0.02, 1.02)
     _fig.suptitle("Well-level phenotypic recovery metrics", fontweight="bold")
     _fig.tight_layout()
-    _fig.savefig(FIGS_DIR / "well_level_recovery_overview.png", dpi=180, bbox_inches="tight")
+    _figure_path = FIGS_DIR / "well_level_recovery_overview.png"
+    _figure_status = save_figure_protected(
+        _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=180, bbox_inches="tight",
+    )
     plt.close(_fig)
-    print("✓ Saved: well_level_recovery_overview.png")
+    print(f"✓ Well-level overview {_figure_status}: {_figure_path}")
     _fig
     return
 
@@ -1103,11 +1170,14 @@ def _(
 def _(
     BASELINE_LABEL,
     CONC_COL,
+    CONFIG,
     FIGS_DIR,
     PROLIFERATIVE_LABEL,
     TREATMENT_COL,
     pd,
     plt,
+    print,
+    save_figure_protected,
     well_recovery_df,
 ):
     if CONC_COL and CONC_COL in well_recovery_df.columns:
@@ -1140,9 +1210,13 @@ def _(
         _axes[2].legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
         _fig.suptitle("Dose-dependent phenotypic recovery", fontweight="bold")
         _fig.tight_layout()
-        _fig.savefig(FIGS_DIR / "dose_response_recovery.png", dpi=180, bbox_inches="tight")
+        _figure_path = FIGS_DIR / "dose_response_recovery.png"
+        _figure_status = save_figure_protected(
+            _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+            dpi=180, bbox_inches="tight",
+        )
         plt.close(_fig)
-        print("✓ Saved: dose_response_recovery.png")
+        print(f"✓ Dose-response figure {_figure_status}: {_figure_path}")
         _display = _fig
     else:
         print("Concentration metadata unavailable; dose-response plots skipped.")
@@ -1164,7 +1238,7 @@ def _(mo):
 
 
 @app.cell
-def _(FIGS_DIR, TREATMENT_COL, cell_recovery_df, np, plt):
+def _(CONFIG, FIGS_DIR, TREATMENT_COL, cell_recovery_df, np, plt, print, save_figure_protected):
     _conditions = cell_recovery_df[TREATMENT_COL].astype(str).drop_duplicates().tolist()
     _fig, _axes = plt.subplots(1, 2, figsize=(16, 5.5))
     for _condition in _conditions:
@@ -1190,9 +1264,13 @@ def _(FIGS_DIR, TREATMENT_COL, cell_recovery_df, np, plt):
     _axes[1].set_title("Recovery-score ECDF")
     _axes[1].legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
     _fig.tight_layout()
-    _fig.savefig(FIGS_DIR / "single_cell_recovery_distributions.png", dpi=180, bbox_inches="tight")
+    _figure_path = FIGS_DIR / "single_cell_recovery_distributions.png"
+    _figure_status = save_figure_protected(
+        _fig, _figure_path, overwrite=CONFIG.overwrite_existing_outputs,
+        dpi=180, bbox_inches="tight",
+    )
     plt.close(_fig)
-    print("✓ Saved: single_cell_recovery_distributions.png")
+    print(f"✓ Single-cell distribution figure {_figure_status}: {_figure_path}")
     _fig
     return
 
@@ -1212,7 +1290,7 @@ def _(mo):
 
 
 @app.cell
-def _(CONC_COL, PLATE_COL, TREATMENT_COL, pd, smf, well_recovery_df):
+def _(CONC_COL, PLATE_COL, TREATMENT_COL, pd, print, smf, well_recovery_df):
     model_df = well_recovery_df.copy()
     if CONC_COL and CONC_COL in model_df.columns:
         model_df[CONC_COL] = pd.to_numeric(model_df[CONC_COL], errors="coerce")
@@ -1250,6 +1328,7 @@ def _(
     pca_sc,
     pd,
     unit_vector,
+    print,
     write_csv_protected,
 ):
     _n_pcs_used = min(N_RECOVERY_PCS, pca_sc.components_.shape[0], unit_vector.size)
@@ -1288,7 +1367,7 @@ def _(
 
 
 @app.cell
-def _(CONFIG, RESULTS_DIR, recovery_feature_weights_df, write_csv_protected):
+def _(CONFIG, RESULTS_DIR, print, recovery_feature_weights_df, write_csv_protected):
     family_weights_df = (
         recovery_feature_weights_df.groupby("feature_family", as_index=False)
         .agg(
@@ -1314,7 +1393,7 @@ def _(CONFIG, RESULTS_DIR, recovery_feature_weights_df, write_csv_protected):
 
 
 @app.cell
-def _(pd, recovery_feature_weights_df):
+def _(pd, print, recovery_feature_weights_df):
     _moment_mask = recovery_feature_weights_df["feature"].str.contains(
         r"HuMoment|CentralMoment|NormalizedMoment", regex=True, na=False
     )
@@ -1426,11 +1505,13 @@ def _(
     np,
     pd,
     platform,
+    print,
     subprocess,
     timezone,
     well_recovery_df,
 ):
-    NOTEBOOK_NAME = "07_recovery_axis_analysis.py"
+    NOTEBOOK_NAME = "extras/recovery_axis_analysis.py"
+    from hca_pipeline.provenance import canonicalize_provenance, provenance_json
 
     def run_git_command(arguments: Sequence[str], repo_root) -> str | None:
         """Run a read-only Git command and return stripped stdout."""
@@ -1449,7 +1530,7 @@ def _(
     git_status = run_git_command(["status", "--porcelain"], REPO_ROOT)
 
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pipeline": {
             "notebook": NOTEBOOK_NAME,
             "experiment_id": EXPERIMENT_ID,
@@ -1496,29 +1577,46 @@ def _(
         },
     }
 
+    _declared_outputs = [
+        RESULTS_DIR / "single_cell_recovery_scores.parquet",
+        RESULTS_DIR / "well_level_recovery_summary.csv",
+        RESULTS_DIR / "condition_level_recovery_summary.csv",
+        RESULTS_DIR / "recovery_axis_feature_weights.csv",
+        RESULTS_DIR / "recovery_axis_feature_family_weights.csv",
+    ]
+    provenance = canonicalize_provenance(
+        provenance,
+        notebook=NOTEBOOK_NAME,
+        experiment_id=EXPERIMENT_ID,
+        repo_root=REPO_ROOT,
+        dependencies=[INPUT_PARQUET],
+        outputs=_declared_outputs,
+    )
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    provenance_latest_path = RESULTS_DIR / "provenance_nb07_latest.json"
-    with provenance_latest_path.open("w", encoding="utf-8") as _f:
-        json.dump(provenance, _f, indent=2, ensure_ascii=False)
+    provenance_latest_path = RESULTS_DIR / "provenance_recovery_axis_latest.json"
+    _provenance_payload = provenance_json(provenance)
+    if provenance_latest_path.exists() and not CONFIG.overwrite_existing_outputs:
+        _latest_status = "unchanged (existing provenance protected)"
+    else:
+        _latest_status = "replaced" if provenance_latest_path.exists() else "created"
+        provenance_latest_path.write_text(_provenance_payload, encoding="utf-8")
 
     provenance_history_path = None
     if CONFIG.save_provenance_history:
-        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        provenance_history_path = RESULTS_DIR / f"provenance_nb07_{_timestamp}.json"
-        if provenance_history_path.exists():
-            raise FileExistsError(f"Historical provenance file already exists: {provenance_history_path}")
-        with provenance_history_path.open("w", encoding="utf-8") as _f:
-            json.dump(provenance, _f, indent=2, ensure_ascii=False)
+        _timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        provenance_history_path = RESULTS_DIR / f"provenance_recovery_axis_{_timestamp}.json"
+        provenance_history_path.write_text(_provenance_payload, encoding="utf-8")
 
     print("═" * 72)
-    print("NB07 PROVENANCE (optional recovery-axis extension)")
+    print("RECOVERY-AXIS EXTRA PROVENANCE")
     print("═" * 72)
     print(f"  Notebook:            {NOTEBOOK_NAME}")
     print(f"  Experiment:          {EXPERIMENT_ID}")
     print(f"  Baseline reference:  {BASELINE_LABEL}")
     print(f"  Proliferative ref.:  {PROLIFERATIVE_LABEL}")
     print(f"  Git commit:          {provenance['version_control']['git_commit_short']}")
-    print(f"✓ Latest provenance:   {provenance_latest_path}")
+    print(f"✓ Latest provenance:   {_latest_status} — {provenance_latest_path}")
+    print(f"  Schema:              v{provenance['schema_version']}")
     if provenance_history_path is not None:
         print(f"✓ Historical record:  {provenance_history_path}")
     return (provenance_latest_path,)
@@ -1535,6 +1633,7 @@ def _(mo):
 @app.cell
 def _(
     BASELINE_LABEL,
+    CONC_COL,
     EXPERIMENT_ID,
     FIGS_DIR,
     PROLIFERATIVE_LABEL,
@@ -1544,6 +1643,7 @@ def _(
     condition_recovery_df,
     cv_metrics_df,
     family_weights_df,
+    print,
     provenance_latest_path,
     recovery_feature_weights_df,
     well_recovery_df,
@@ -1555,16 +1655,23 @@ def _(
         RESULTS_DIR / "recovery_axis_feature_weights.csv",
         RESULTS_DIR / "recovery_axis_feature_family_weights.csv",
         provenance_latest_path,
+        FIGS_DIR / "reference_geometric_validation.png",
+        FIGS_DIR / "reference_classifier_validation.png",
+        FIGS_DIR / "recovery_parallel_vs_orthogonal.png",
+        FIGS_DIR / "well_level_recovery_overview.png",
+        FIGS_DIR / "single_cell_recovery_distributions.png",
     ]
+    if CONC_COL and CONC_COL in cell_recovery_df.columns:
+        _required_outputs.append(FIGS_DIR / "dose_response_recovery.png")
     _missing_outputs = [p for p in _required_outputs if not Path(p).exists()]
     if _missing_outputs:
         raise RuntimeError(
-            "NB07 integrity check failed — required output files are missing: "
+            "Recovery-axis extra integrity check failed — required output files are missing: "
             + ", ".join(str(p) for p in _missing_outputs)
         )
 
     print("═" * 72)
-    print("NB07 COMPLETED — optional recovery-axis extension")
+    print("RECOVERY-AXIS EXTRA COMPLETED")
     print("═" * 72)
     print(f"  Experiment:              {EXPERIMENT_ID}")
     print(f"  Baseline reference:      {BASELINE_LABEL}")
@@ -1588,47 +1695,25 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Export a PDF report
+    ## Save the analysis record
 
-    Optional. Renders this notebook — markdown, code, and outputs — into a
-    paginated PDF and saves it under `reports/` for this experiment,
-    alongside `results/` and `figures/`. Rendering re-runs the notebook
-    headlessly in a fresh process, so the report reflects whatever is
-    currently saved in `experiment_config.json` (written by the
-    configuration cell above each time this notebook runs), not any
-    unsaved changes to the widgets above.
+    Save the notebook's **current session** without rerunning cells. HTML
+    preserves rich outputs and expanded details; PDF provides a clean reading
+    copy without code. Chromium can save both directly to the experiment's
+    `reports/` folder after authorization. Safari provides separate downloads.
     """)
     return
 
 
 @app.cell
-def _(mo):
-    export_report_button = mo.ui.run_button(
-        label="Export this notebook as a PDF report", kind="success"
+def _(EXPERIMENT_ID, mo):
+    from hca_pipeline.report_export import SessionReportSaver
+
+    _report_saver = SessionReportSaver(
+        basename=f"{EXPERIMENT_ID}_extra_recovery_axis_analysis",
+        suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
-    export_report_button
-    return (export_report_button,)
-
-
-@app.cell
-def _(EXPERIMENT_ID, Path, REPO_ROOT, export_report_button, mo):
-    mo.stop(not export_report_button.value)
-
-    from hca_pipeline.report_export import export_notebook_pdf
-
-    _notebook_file = Path(__file__).resolve()
-    _reports_dir = REPO_ROOT / "workspace" / "analysis" / EXPERIMENT_ID / "reports"
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _report_path = _reports_dir / f"{_notebook_file.stem}.pdf"
-
-    with mo.status.spinner(title="Rendering PDF report (re-runs this notebook headlessly)"):
-        export_notebook_pdf(
-            _notebook_file,
-            _report_path,
-            title=f"{EXPERIMENT_ID} — {_notebook_file.stem}",
-        )
-
-    mo.md(f"✓ Report saved: `{_report_path}`")
+    mo.ui.anywidget(_report_saver)
     return
 
 
